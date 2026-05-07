@@ -5,7 +5,7 @@ const auth = require('../middleware/auth');
 
 router.get('/', auth, async (req, res) => {
   try {
-    const result = await db.query('SELECT id, login, nombre, rol, area, activo, ultimo_acceso, created_at FROM usuarios ORDER BY nombre');
+    const result = await db.query('SELECT id, login, nombre, rol, area, activo, ultimo_acceso, created_at FROM usuarios WHERE activo=true ORDER BY nombre');
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -26,8 +26,10 @@ router.post('/', auth, async (req, res) => {
 router.delete('/:id', auth, async (req, res) => {
   try {
     if (req.user.rol !== 'Super Admin') return res.status(403).json({ error: 'Sin permisos' });
-    await db.query('UPDATE usuarios SET activo = false WHERE id = $1', [req.params.id]);
-    res.json({ ok: true });
+    // Eliminar físicamente
+    const result = await db.query('DELETE FROM usuarios WHERE id=$1 AND login != \'admin\' RETURNING login', [req.params.id]);
+    if (!result.rows.length) return res.status(400).json({ error: 'No se puede eliminar este usuario' });
+    res.json({ ok: true, eliminado: result.rows[0].login });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
