@@ -2,20 +2,9 @@ const router = require('express').Router();
 const db = require('../db');
 const auth = require('../middleware/auth');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = path.join(__dirname, '../../uploads/contratos', req.params.id || 'temp');
-    fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + '-' + Math.round(Math.random()*1e6) + path.extname(file.originalname));
-  }
-});
-const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } });
+const uploadToCloudinary = require('../cloudinary_upload');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 // Listar contratos
 router.get('/', auth, async (req, res) => {
@@ -111,13 +100,17 @@ router.post('/:id/pagos', auth, async (req, res) => {
 router.post('/:id/pagos/:pagoId/documentos', auth, upload.single('archivo'), async (req, res) => {
   try {
     const { nombre, tipo, version, observacion } = req.body;
-    const dir = path.join(__dirname, '../../uploads/contratos', req.params.id, 'pagos', req.params.pagoId);
-    fs.mkdirSync(dir, { recursive: true });
-    const file_path = req.file ? `/uploads/contratos/${req.params.id}/pagos/${req.params.pagoId}/${req.file.filename}` : null;
+    let file_path = null;
+    let pago_file_size = null, pago_mime = null;
+    if (req.file) {
+      const fname = Date.now()+'-'+req.file.originalname.replace(/[^a-zA-Z0-9.]/g,'_');
+      const res2 = await uploadToCloudinary(req.file.buffer, fname, `contratos/${req.params.id}/pagos/${req.params.pagoId}`);
+      file_path = res2.secure_url; pago_file_size = req.file.size; pago_mime = req.file.mimetype;
+    }
     const result = await db.query(
       `INSERT INTO contratos_pagos_docs (pago_id,contrato_id,nombre,tipo,formato,version,observacion,file_path,file_size,mime_type,cargado_por)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [req.params.pagoId, req.params.id, nombre, tipo, req.body.formato||'PDF', version||1, observacion, file_path, req.file?.size||null, req.file?.mimetype||null, req.user.login]
+      [req.params.pagoId, req.params.id, nombre, tipo, req.body.formato||'PDF', version||1, observacion, file_path, pago_file_size, pago_mime, req.user.login]
     );
     // Verificar si el pago está completo
     const docs = await db.query('SELECT tipo FROM contratos_pagos_docs WHERE pago_id=$1', [req.params.pagoId]);
