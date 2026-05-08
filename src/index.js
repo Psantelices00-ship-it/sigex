@@ -19,3 +19,4 @@ app.get('/', (req, res) => res.json({ sistema: 'SIGEX', version: '1.0', estado: 
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`🚀 SIGEX corriendo en puerto ${PORT}`));
+// force Fri May  8 10:21:07 -04 2026
