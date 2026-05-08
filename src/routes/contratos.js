@@ -145,4 +145,18 @@ router.patch('/:id/estado', auth, async (req, res) => {
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
+// Registrar archivo físico de pago mensual
+router.patch('/:id/pagos/:pagoId/archivo', auth, async (req, res) => {
+  try {
+    const { caja, estante, posicion, sala, fecha_archivo, obs_archivo } = req.body;
+    await db.query(
+      'UPDATE contratos_pagos SET caja=$1,estante=$2,posicion=$3,sala=$4,fecha_archivo=$5,obs_archivo=$6,archivado_por=$7 WHERE id=$8 AND contrato_id=$9',
+      [caja, estante, posicion||null, sala||null, fecha_archivo||null, obs_archivo||null, req.user.login, req.params.pagoId, req.params.id]
+    );
+    await db.query('INSERT INTO contratos_historial (contrato_id,usuario,accion,nota,tipo) VALUES ($1,$2,$3,$4,$5)',
+      [req.params.id, req.user.login, 'Pago archivado físicamente', `Caja ${caja} · Estante ${estante}${sala?' · '+sala:''}`, 'archivo']);
+    res.json({ ok: true });
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
 module.exports = router;
