@@ -16,10 +16,11 @@ function uploadToCloudinary(buffer, filename, folder) {
     const stream = cloudinary.uploader.upload_stream(
       { 
         folder: `sigex/${folder}`,
-        resource_type: 'auto',
+        resource_type: 'raw',
         public_id: filename,
         use_filename: true,
-        unique_filename: true
+        unique_filename: false,
+        access_mode: 'public'
       },
       (error, result) => {
         if (error) reject(error);
