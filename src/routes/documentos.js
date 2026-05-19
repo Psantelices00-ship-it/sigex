@@ -1,12 +1,13 @@
 const router = require('express').Router();
 const db = require('../db');
 const auth = require('../middleware/auth');
+const { suggestEstadoFromDocumentos } = require('../lib/expedienteWorkflow');
 const multer = require('multer');
 const cloudinary = require('../cloudinary');
 const streamifier = require('streamifier');
+const { streamRemoteFileToResponse } = require('../streamRemoteFile');
 
-// Usar memoria en vez de disco
-const upload = multer({ 
+const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }
 });
@@ -14,13 +15,9 @@ const upload = multer({
 function uploadToCloudinary(buffer, filename, folder) {
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
-      { 
+      {
         folder: `sigex/${folder}`,
-        resource_type: 'raw',
-        public_id: filename,
-        use_filename: true,
-        unique_filename: false,
-        access_mode: 'public'
+        resource_type: 'raw'
       },
       (error, result) => {
         if (error) reject(error);
@@ -31,6 +28,32 @@ function uploadToCloudinary(buffer, filename, folder) {
   });
 }
 
+// Ver archivo (ruta fija antes de /:expId para no confundir "ver" con un expediente)
+router.get('/ver/:id', async (req, res) => {
+  try {
+    const doc = await db.query('SELECT * FROM documentos WHERE id = $1', [req.params.id]);
+    if (!doc.rows.length) return res.status(404).json({ error: 'No encontrado' });
+    if (!doc.rows[0].file_path) return res.status(404).json({ error: 'Sin archivo' });
+    res.redirect(doc.rows[0].file_path);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Ver archivo con JWT (proxy Cloudinary; mismo motivo que contratos)
+router.get('/:expId/:docId/archivo', auth, async (req, res) => {
+  try {
+    const doc = await db.query(
+      'SELECT * FROM documentos WHERE id = $1 AND expediente_id = $2',
+      [req.params.docId, req.params.expId]
+    );
+    if (!doc.rows.length) return res.status(404).json({ error: 'No encontrado' });
+    const row = doc.rows[0];
+    if (!row.file_path) return res.status(404).json({ error: 'Sin archivo' });
+    await streamRemoteFileToResponse(row.file_path, res, { mimeType: row.mime_type, filename: row.nombre });
+  } catch (err) {
+    if (!res.headersSent) res.status(502).json({ error: err.message || 'No se pudo obtener el archivo' });
+  }
+});
+
 // Subir documento a expediente
 router.post('/:expId', auth, upload.single('archivo'), async (req, res) => {
   try {
@@ -40,23 +63,50 @@ router.post('/:expId', auth, upload.single('archivo'), async (req, res) => {
     let mime_type = null;
 
     if (req.file) {
-      const filename = `${Date.now()}-${req.file.originalname.replace(/[^a-zA-Z0-9.]/g,'_')}`;
+      const ext = req.file.originalname.split('.').pop().toLowerCase();
+      const baseName = req.file.originalname.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50);
+      const filename = `${Date.now()}-${baseName}.${ext}`;
       const result = await uploadToCloudinary(req.file.buffer, filename, `expedientes/${req.params.expId}`);
       file_path = result.secure_url;
       file_size = req.file.size;
       mime_type = req.file.mimetype;
     }
 
+    const expRow = await db.query('SELECT id, estado FROM expedientes WHERE id = $1', [req.params.expId]);
+    if (!expRow.rows.length) return res.status(404).json({ error: 'Expediente no encontrado' });
+    const estadoPrev = expRow.rows[0].estado;
+
     const result = await db.query(
       `INSERT INTO documentos (expediente_id, nombre, tipo, formato, version, observacion, file_path, file_size, mime_type, cargado_por)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-      [req.params.expId, nombre, tipo, req.body.formato||'PDF', version||1, observacion, file_path, file_size, mime_type, req.user.login]
+      [req.params.expId, nombre, tipo, req.body.formato || 'PDF', version || 1, observacion, file_path, file_size, mime_type, req.user.login]
     );
     await db.query(
       'INSERT INTO historial (expediente_id, usuario, accion, nota, tipo) VALUES ($1,$2,$3,$4,$5)',
       [req.params.expId, req.user.login, 'Documento cargado', `"${nombre}" (${tipo})`, 'documento']
     );
-    res.status(201).json(result.rows[0]);
+
+    const allTipos = await db.query('SELECT tipo FROM documentos WHERE expediente_id = $1', [req.params.expId]);
+    const nuevoEstado = suggestEstadoFromDocumentos(allTipos.rows, estadoPrev);
+    if (nuevoEstado && nuevoEstado !== estadoPrev) {
+      await db.query('UPDATE expedientes SET estado = $1, updated_at = NOW() WHERE id = $2', [nuevoEstado, req.params.expId]);
+      await db.query(
+        'INSERT INTO historial (expediente_id, usuario, accion, nota, tipo) VALUES ($1,$2,$3,$4,$5)',
+        [
+          req.params.expId,
+          req.user.login,
+          'Estado actualizado (automático)',
+          `${estadoPrev} → ${nuevoEstado} · al cargar: ${tipo}`,
+          'estado',
+        ]
+      );
+    }
+
+    res.status(201).json({
+      ...result.rows[0],
+      expediente_estado: nuevoEstado || estadoPrev,
+      estado_auto: Boolean(nuevoEstado && nuevoEstado !== estadoPrev),
+    });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 

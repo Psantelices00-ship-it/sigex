@@ -1,0 +1,31 @@
+# Stack local del API SIGEX (nombre compose: sigex-api — no usa el contenedor viejo "sigex-db").
+# Puerto host 5433 → 5432 (coincide con src/db.js por defecto).
+#
+# Primera vez o si tenías el contenedor antiguo:
+#   docker rm -f sigex-db 2>/dev/null; true
+#   docker compose up -d
+#   npm run db:init
+
+name: sigex-api
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sigex-api-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: sigex
+    ports:
+      - "5433:5432"
+    volumes:
+      - sigex_api_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sigex"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  sigex_api_pgdata:

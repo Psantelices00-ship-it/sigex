@@ -1,0 +1,19 @@
+# Plantilla para producción (Railway) — SIGEX API
+#
+# 1) En Railway → PostgreSQL → copiá DATABASE_URL
+# 2) Abrí el archivo .env en esta carpeta (ver abajo cómo verlo)
+# 3) Pegá DATABASE_URL y DATABASE_SSL=true
+# 4) No compartas este archivo por WhatsApp ni en chats con IA
+#
+# Ejemplo (reemplazá con TU URL real de Railway):
+
+DATABASE_URL=postgresql://postgres:TU_PASSWORD@TU_HOST.railway.app:5432/railway
+DATABASE_SSL=true
+
+JWT_SECRET=ya-debe-estar-en-railway-tambien
+NODE_ENV=production
+PORT=3001
+
+CLOUDINARY_CLOUD_NAME=tu_cloud
+CLOUDINARY_API_KEY=tu_key
+CLOUDINARY_API_SECRET=tu_secret

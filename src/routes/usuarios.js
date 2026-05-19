@@ -33,4 +33,35 @@ router.delete('/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+router.patch('/:id', auth, async (req, res) => {
+  try {
+    if (req.user.rol !== 'Super Admin') return res.status(403).json({ error: 'Sin permisos' });
+    const { login, nombre, rol, area, password } = req.body;
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'ID inválido' });
+
+    const pw = password != null && String(password).trim() !== '' ? String(password) : null;
+    if (pw && pw.length < 4) return res.status(400).json({ error: 'La contraseña debe tener al menos 4 caracteres' });
+
+    if (pw) {
+      const hash = await bcrypt.hash(pw, 10);
+      const result = await db.query(
+        'UPDATE usuarios SET login=$1, nombre=$2, rol=$3, area=$4, password_hash=$5 WHERE id=$6 RETURNING id, login, nombre, rol, area',
+        [login, nombre, rol, area || null, hash, id]
+      );
+      if (!result.rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });
+      return res.json(result.rows[0]);
+    }
+    const result = await db.query(
+      'UPDATE usuarios SET login=$1, nombre=$2, rol=$3, area=$4 WHERE id=$5 RETURNING id, login, nombre, rol, area',
+      [login, nombre, rol, area || null, id]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    if (err.code === '23505') return res.status(400).json({ error: 'Ese login ya está en uso' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
