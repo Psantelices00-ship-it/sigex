@@ -8,7 +8,9 @@ const connectionString = process.env.DATABASE_URL?.trim();
  */
 function resolveSsl(url) {
   if (!url) return false;
+  if (process.env.DATABASE_SSL === 'false') return false;
   if (process.env.DATABASE_SSL === 'true') return { rejectUnauthorized: false };
+  if (/railway\.app|rlwy\.net/i.test(url)) return { rejectUnauthorized: false };
   return false;
 }
 

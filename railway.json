@@ -4,6 +4,7 @@
     "buildCommand": "npm install"
   },
   "deploy": {
+    "releaseCommand": "node scripts/run-all-migrations.js",
     "startCommand": "node src/index.js",
     "healthcheckPath": "/",
     "healthcheckTimeout": 300,

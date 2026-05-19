@@ -3,6 +3,12 @@
  * Uso: node scripts/run-all-migrations.js
  */
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+
+const dbUrl = process.env.DATABASE_URL || '';
+if (dbUrl.includes('railway') && process.env.DATABASE_SSL !== 'false') {
+  process.env.DATABASE_SSL = 'true';
+}
+
 const fs = require('fs');
 const path = require('path');
 const db = require('../src/db');
