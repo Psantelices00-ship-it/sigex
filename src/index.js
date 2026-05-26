@@ -23,9 +23,32 @@ app.use('/api/cheques',     require('./routes/cheques'));
 app.use('/api/caja-chica',  require('./routes/caja-chica'));
 app.use('/api/archivo-fisico', require('./routes/archivo-fisico'));
 
-app.get('/', (req, res) => res.json({ sistema: 'SIGEX', version: '1.0', estado: 'activo' }));
+app.get('/', (req, res) =>
+  res.json({
+    sistema: 'SIGEX',
+    version: '1.1.0',
+    build: '2026-05-26-cheques',
+    estado: 'activo',
+    modulos: [
+      'auth',
+      'solicitudes',
+      'expedientes',
+      'compras',
+      'documentos',
+      'usuarios',
+      'contratos',
+      'correspondencia',
+      'remuneraciones',
+      'honorarios',
+      'cheques',
+      'caja-chica',
+      'archivo-fisico',
+    ],
+  })
+);
 
 const PORT = process.env.PORT || 3001;
 // Railway (y otros PaaS) enrutan el health check a la interfaz IPv4; escuchar solo en localhost falla la revisión de salud.
-app.listen(PORT, '0.0.0.0', () => console.log(`🚀 SIGEX corriendo en puerto ${PORT}`));
-// force Fri May  8 10:21:07 -04 2026
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 SIGEX v1.1.0 (cheques+caja-chica) en puerto ${PORT}`);
+});

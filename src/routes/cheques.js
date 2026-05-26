@@ -68,6 +68,16 @@ router.get('/cartolas/:id/archivo', auth, async (req, res) => {
   }
 });
 
+/** Lista solo talonarios (opcional; el resumen completo es GET /api/cheques). */
+router.get('/talonarios', auth, async (req, res) => {
+  try {
+    const result = await db.query('SELECT * FROM cheques_talonarios ORDER BY created_at DESC');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post('/talonarios', auth, async (req, res) => {
   try {
     const nombre = String(req.body.nombre || 'Talonario').trim();
