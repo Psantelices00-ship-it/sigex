@@ -238,16 +238,22 @@ router.post('/conciliar', auth, async (req, res) => {
     }
 
     const sin_match_emitidos = emitidosRes.rows
-      .filter((x) => x.estado === 'emitido')
+      .filter((x) => x.estado === 'emitido' && !emitidosUsados.has(x.id))
       .map((x) => ({ id: x.id, numero_cheque: x.numero_cheque, beneficiario: x.beneficiario }));
     const sin_match_cartola = movsChq.filter((m) => !movsUsados.has(mkMovKey(m)));
+    const pendientes = await db.query("SELECT COUNT(*)::int AS n FROM cheques_emitidos WHERE estado = 'emitido'");
 
     const resultado = {
       cartola_id: cartolaId,
+      fecha_corrida: new Date().toISOString(),
       matched: matchedPairs.length,
+      marcados_cobro: matchedPairs.length,
       matched_pairs: matchedPairs,
+      pairs: matchedPairs,
       sin_match_emitidos,
       sin_match_cartola,
+      movimientos_cheque_en_cartola: movsChq.length,
+      emitidos_sin_cobro_global: pendientes.rows[0]?.n ?? 0,
     };
     await db.query('UPDATE cheques_cartolas SET resultado_conciliacion=$1 WHERE id=$2', [
       JSON.stringify(resultado),
