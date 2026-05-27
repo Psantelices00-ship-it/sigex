@@ -168,14 +168,43 @@ router.get('/:id', auth, async (req, res) => {
 // Crear
 router.post('/', auth, async (req, res) => {
   try {
-    const { descripcion, solicitante, area, tipo_gasto, monto, prioridad, fecha_ingreso, observaciones, solicitud_ids } = req.body;
+    const {
+      descripcion,
+      solicitante,
+      area,
+      tipo_gasto,
+      monto,
+      monto_real,
+      cuenta_contable,
+      prioridad,
+      fecha_ingreso,
+      observaciones,
+      solicitud_ids,
+    } = req.body;
     const year = new Date().getFullYear();
     const count = await db.query("SELECT COUNT(*) FROM expedientes WHERE EXTRACT(YEAR FROM created_at) = $1", [year]);
     const numero = `EXP-${year}-${String(parseInt(count.rows[0].count) + 1).padStart(5, '0')}`;
+    const montoEst = monto != null && monto !== '' ? Number(monto) : 0;
+    const montoRealVal =
+      monto_real != null && monto_real !== '' ? Number(monto_real) : null;
+    const cuentaVal = cuenta_contable != null ? String(cuenta_contable).trim() || null : null;
     const result = await db.query(
-      `INSERT INTO expedientes (numero, descripcion, solicitante, area, tipo_gasto, monto, prioridad, estado, fecha_ingreso, observaciones, creado_por)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'Ingresado',$8,$9,$10) RETURNING *`,
-      [numero, descripcion, solicitante, area, tipo_gasto, monto || 0, prioridad || 'Normal', fecha_ingreso || new Date(), observaciones, req.user.login]
+      `INSERT INTO expedientes (numero, descripcion, solicitante, area, tipo_gasto, monto, monto_real, cuenta_contable, prioridad, estado, fecha_ingreso, observaciones, creado_por)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'Ingresado',$10,$11,$12) RETURNING *`,
+      [
+        numero,
+        descripcion,
+        solicitante,
+        area,
+        tipo_gasto,
+        montoEst,
+        montoRealVal,
+        cuentaVal,
+        prioridad || 'Normal',
+        fecha_ingreso || new Date(),
+        observaciones,
+        req.user.login,
+      ]
     );
     const row = result.rows[0];
     await db.query(
@@ -209,6 +238,71 @@ router.post('/', auth, async (req, res) => {
     }
     res.status(201).json({ ...row, solicitudes_vinculadas: vinculadas });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Monto real y cuenta contable
+router.patch('/:id/datos-compra', auth, async (req, res) => {
+  try {
+    const { monto_real, cuenta_contable } = req.body || {};
+    const prev = await db.query(
+      'SELECT numero, monto, monto_real, cuenta_contable FROM expedientes WHERE id = $1',
+      [req.params.id]
+    );
+    if (!prev.rows.length) return res.status(404).json({ error: 'No encontrado' });
+
+    const updates = [];
+    const params = [];
+    let i = 1;
+    const notas = [];
+
+    if (monto_real !== undefined) {
+      const val =
+        monto_real === null || monto_real === ''
+          ? null
+          : Number(monto_real);
+      if (val != null && Number.isNaN(val)) {
+        return res.status(400).json({ error: 'Monto real inválido' });
+      }
+      updates.push(`monto_real = $${i++}`);
+      params.push(val);
+      const ant = prev.rows[0].monto_real ?? prev.rows[0].monto;
+      notas.push(
+        `Monto real: $${Number(ant || 0).toLocaleString('es-CL')} → $${Number(val || 0).toLocaleString('es-CL')}`
+      );
+    }
+
+    if (cuenta_contable !== undefined) {
+      const val =
+        cuenta_contable === null || cuenta_contable === ''
+          ? null
+          : String(cuenta_contable).trim().slice(0, 60);
+      updates.push(`cuenta_contable = $${i++}`);
+      params.push(val);
+      notas.push(
+        `Cuenta contable: ${prev.rows[0].cuenta_contable || '—'} → ${val || '—'}`
+      );
+    }
+
+    if (!updates.length) {
+      return res.status(400).json({ error: 'Indicá monto_real y/o cuenta_contable' });
+    }
+
+    updates.push('updated_at = NOW()');
+    params.push(req.params.id);
+    const result = await db.query(
+      `UPDATE expedientes SET ${updates.join(', ')} WHERE id = $${i} RETURNING *`,
+      params
+    );
+
+    await db.query(
+      'INSERT INTO historial (expediente_id, usuario, accion, nota, tipo) VALUES ($1,$2,$3,$4,$5)',
+      [req.params.id, req.user.login, 'Datos de compra actualizados', notas.join(' · '), 'edicion']
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Cambiar estado
