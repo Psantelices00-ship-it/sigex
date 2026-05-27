@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS expedientes (
   monto NUMERIC(14,2) DEFAULT 0,
   monto_real NUMERIC(14,2),
   cuenta_contable VARCHAR(60),
+  fecha_oc DATE,
   prioridad VARCHAR(20) DEFAULT 'Normal',
   estado VARCHAR(40) DEFAULT 'Ingresado',
   fecha_ingreso DATE,

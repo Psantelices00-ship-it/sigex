@@ -114,8 +114,8 @@ router.get('/', auth, async (req, res) => {
     let detalleCuenta = null;
     if (codigoFiltro && lineas.length === 1) {
       const compras = await db.query(
-        `SELECT id, numero, descripcion, estado, created_at,
-                COALESCE(NULLIF(monto_real, 0), monto, 0) AS monto_comprometido
+      `SELECT id, numero, descripcion, estado, created_at, fecha_oc,
+              COALESCE(NULLIF(monto_real, 0), monto, 0) AS monto_comprometido
          FROM expedientes
          WHERE cuenta_contable IS NOT NULL AND trim(cuenta_contable) <> ''
          ORDER BY created_at DESC`
@@ -162,7 +162,7 @@ router.get('/cuenta/:codigo', auth, async (req, res) => {
     );
 
     const compras = await db.query(
-      `SELECT id, numero, descripcion, estado,
+      `SELECT id, numero, descripcion, estado, fecha_oc,
               COALESCE(NULLIF(monto_real, 0), monto, 0) AS monto_comprometido
        FROM expedientes
        WHERE cuenta_contable IS NOT NULL

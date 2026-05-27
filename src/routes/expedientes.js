@@ -177,6 +177,7 @@ router.post('/', auth, async (req, res) => {
       monto,
       monto_real,
       cuenta_contable,
+      fecha_oc,
       prioridad,
       fecha_ingreso,
       observaciones,
@@ -192,9 +193,11 @@ router.post('/', auth, async (req, res) => {
       cuenta_contable != null && String(cuenta_contable).trim()
         ? normalizeCodigoCuenta(cuenta_contable) || String(cuenta_contable).trim().slice(0, 60)
         : null;
+    const fechaOcVal =
+      fecha_oc != null && String(fecha_oc).trim() ? String(fecha_oc).trim().slice(0, 10) : null;
     const result = await db.query(
-      `INSERT INTO expedientes (numero, descripcion, solicitante, area, tipo_gasto, monto, monto_real, cuenta_contable, prioridad, estado, fecha_ingreso, observaciones, creado_por)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'Ingresado',$10,$11,$12) RETURNING *`,
+      `INSERT INTO expedientes (numero, descripcion, solicitante, area, tipo_gasto, monto, monto_real, cuenta_contable, fecha_oc, prioridad, estado, fecha_ingreso, observaciones, creado_por)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'Ingresado',$11,$12,$13) RETURNING *`,
       [
         numero,
         descripcion,
@@ -204,6 +207,7 @@ router.post('/', auth, async (req, res) => {
         montoEst,
         montoRealVal,
         cuentaVal,
+        fechaOcVal,
         prioridad || 'Normal',
         fecha_ingreso || new Date(),
         observaciones,
@@ -247,9 +251,9 @@ router.post('/', auth, async (req, res) => {
 // Monto real y cuenta contable
 router.patch('/:id/datos-compra', auth, async (req, res) => {
   try {
-    const { monto_real, cuenta_contable } = req.body || {};
+    const { monto_real, cuenta_contable, fecha_oc } = req.body || {};
     const prev = await db.query(
-      'SELECT numero, monto, monto_real, cuenta_contable FROM expedientes WHERE id = $1',
+      'SELECT numero, monto, monto_real, cuenta_contable, fecha_oc FROM expedientes WHERE id = $1',
       [req.params.id]
     );
     if (!prev.rows.length) return res.status(404).json({ error: 'No encontrado' });
@@ -287,8 +291,17 @@ router.patch('/:id/datos-compra', auth, async (req, res) => {
       );
     }
 
+    if (fecha_oc !== undefined) {
+      const val =
+        fecha_oc === null || fecha_oc === '' ? null : String(fecha_oc).trim().slice(0, 10);
+      updates.push(`fecha_oc = $${i++}`);
+      params.push(val);
+      const ant = prev.rows[0].fecha_oc ? String(prev.rows[0].fecha_oc).slice(0, 10) : '—';
+      notas.push(`Fecha OC: ${ant} → ${val || '—'}`);
+    }
+
     if (!updates.length) {
-      return res.status(400).json({ error: 'Indicá monto_real y/o cuenta_contable' });
+      return res.status(400).json({ error: 'Indicá monto_real, cuenta_contable y/o fecha_oc' });
     }
 
     updates.push('updated_at = NOW()');
