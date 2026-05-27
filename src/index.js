@@ -22,6 +22,7 @@ app.use('/api/honorarios',  require('./routes/honorarios'));
 app.use('/api/cheques',     require('./routes/cheques'));
 app.use('/api/caja-chica',  require('./routes/caja-chica'));
 app.use('/api/archivo-fisico', require('./routes/archivo-fisico'));
+app.use('/api/presupuesto',    require('./routes/presupuesto'));
 
 app.get('/', (req, res) =>
   res.json({
@@ -43,6 +44,7 @@ app.get('/', (req, res) =>
       'cheques',
       'caja-chica',
       'archivo-fisico',
+      'presupuesto',
     ],
   })
 );

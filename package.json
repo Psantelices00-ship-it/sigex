@@ -39,7 +39,8 @@
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^1.1.4",
     "pg": "^8.11.0",
-    "streamifier": "^0.1.1"
+    "streamifier": "^0.1.1",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "nodemon": "^3.0.0"

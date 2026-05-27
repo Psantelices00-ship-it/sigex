@@ -6,6 +6,7 @@ const { streamRemoteFileToResponse } = require('../streamRemoteFile');
 const { uploadBuffer } = require('../lib/cloudinaryBufferUpload');
 const { buildConsolidatedPdfBuffer } = require('../lib/consolidarExpedientePdf');
 const { REQUIRED_CLOSURE, computeChecklist } = require('../lib/expedienteWorkflow');
+const { normalizeCodigoCuenta } = require('../lib/presupuestoCuenta');
 
 async function destroyConsolidadoCloudinary(publicId) {
   if (!publicId) return;
@@ -187,7 +188,10 @@ router.post('/', auth, async (req, res) => {
     const montoEst = monto != null && monto !== '' ? Number(monto) : 0;
     const montoRealVal =
       monto_real != null && monto_real !== '' ? Number(monto_real) : null;
-    const cuentaVal = cuenta_contable != null ? String(cuenta_contable).trim() || null : null;
+    const cuentaVal =
+      cuenta_contable != null && String(cuenta_contable).trim()
+        ? normalizeCodigoCuenta(cuenta_contable) || String(cuenta_contable).trim().slice(0, 60)
+        : null;
     const result = await db.query(
       `INSERT INTO expedientes (numero, descripcion, solicitante, area, tipo_gasto, monto, monto_real, cuenta_contable, prioridad, estado, fecha_ingreso, observaciones, creado_por)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'Ingresado',$10,$11,$12) RETURNING *`,
@@ -275,7 +279,7 @@ router.patch('/:id/datos-compra', auth, async (req, res) => {
       const val =
         cuenta_contable === null || cuenta_contable === ''
           ? null
-          : String(cuenta_contable).trim().slice(0, 60);
+          : normalizeCodigoCuenta(cuenta_contable) || String(cuenta_contable).trim().slice(0, 60);
       updates.push(`cuenta_contable = $${i++}`);
       params.push(val);
       notas.push(
