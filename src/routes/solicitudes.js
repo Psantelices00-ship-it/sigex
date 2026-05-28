@@ -386,9 +386,23 @@ router.patch('/:id', auth, async (req, res) => {
 
 router.delete('/:id', auth, async (req, res) => {
   try {
-    if (req.user.rol !== 'Super Admin') return res.status(403).json({ error: 'Sin permisos' });
+    if (req.user.rol !== 'Super Admin') {
+      return res.status(403).json({ error: 'Solo Super Admin puede eliminar solicitudes' });
+    }
+    const prev = await db.query(
+      'SELECT id, numero, expediente_id FROM solicitudes WHERE id = $1',
+      [req.params.id]
+    );
+    if (!prev.rows.length) return res.status(404).json({ error: 'No encontrada' });
+    if (prev.rows[0].expediente_id) {
+      return res.status(400).json({
+        error:
+          'No se puede eliminar: la solicitud está incorporada en un expediente de compra. Desvinculá desde Compras si corresponde.',
+        expediente_id: prev.rows[0].expediente_id,
+      });
+    }
     await db.query('DELETE FROM solicitudes WHERE id = $1', [req.params.id]);
-    res.json({ ok: true });
+    res.json({ ok: true, numero: prev.rows[0].numero });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
