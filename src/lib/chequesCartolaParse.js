@@ -1,110 +1,79 @@
 /**
- * Parser heurístico para texto extraído de cartolas tipo Banco de Chile.
+ * Parser para cartolas Banco de Chile extraídas con pdf-parse.
+ * Formato típico (una línea larga por página):
+ *   DD/MM/AAAA Cheque Pagado|Cobrado ... sucursal N°cheque cargo saldo
  */
 
-function isMontoChileno(tok) {
-  return typeof tok === 'string' && /^\d{1,3}(\.\d{3})*$/.test(tok);
-}
+const RE_CHEQUE_BANCO_CHILE =
+  /(\d{2}\/\d{2}\/\d{4})\s+Cheque[^2]*?(21\d{5})\s+([\d.]+)\s+([\d.]+)/gi
 
-function isNroDocLikely(tok) {
-  return typeof tok === 'string' && /^\d{6,9}$/.test(tok);
-}
-
-function ignoraCabeceraPie(linea) {
-  const s = linea.trim();
-  if (!s) return true;
-  if (/^infórmese sobre la garantía/i.test(s)) return true;
-  if (/©\s*\d{4}\s*banco de chile/i.test(s)) return true;
-  if (/^movimientos al\s+/i.test(s)) return true;
-  if (/^fecha\s+descripción/i.test(s)) return true;
-  if (/saldo disponible|^total cargos|^total abonos|^nombre empresa:|^cuenta n°|^rut:/i.test(s)) return true;
-  if (/--\s*\d+\s+of\s+\d+\s+--/.test(s)) return true;
-  return false;
-}
-
-function bloquesPorMovimiento(texto) {
-  const lineas = texto.split(/\n/).map((l) => l.replace(/\u00a0/g, ' ').trim());
-  const bloques = [];
-  let actual = [];
-  const arrancaFecha = (x) => /^\d{2}\/\d{2}\/\d{4}\b/.test(x);
-  for (const ln of lineas) {
-    if (ignoraCabeceraPie(ln)) continue;
-    if (arrancaFecha(ln)) {
-      if (actual.length) bloques.push(actual.join('\n'));
-      actual = [ln];
-    } else if (actual.length) {
-      actual.push(ln);
-    }
-  }
-  if (actual.length) bloques.push(actual.join('\n'));
-  return bloques;
-}
-
-function parseRestoLinea(prefijoRestoUnaLinea) {
-  let tokens = prefijoRestoUnaLinea.trim().replace(/\s+/g, ' ').split(' ');
-  if (tokens.length < 2) return null;
-  const saldo = tokens.pop();
-  if (!isMontoChileno(saldo)) return null;
-  let abono = null;
-  let cargo = null;
-  if (tokens.length && isMontoChileno(tokens[tokens.length - 1])) {
-    cargo = tokens.pop();
-    if (tokens.length && isMontoChileno(tokens[tokens.length - 1])) {
-      abono = cargo;
-      cargo = tokens.pop();
-    }
-  }
-  let nro_documento = null;
-  if (tokens.length && isNroDocLikely(tokens[tokens.length - 1])) {
-    nro_documento = tokens.pop();
-  }
-  const descripcion = tokens.join(' ').trim();
-  return { descripcion, nro_documento, cargo, abono, saldo };
-}
-
-function parseUnBloque(bloque) {
-  const m = bloque.match(/^(\d{2}\/\d{2}\/\d{4})\s+([\s\S]+)$/);
-  if (!m) return null;
-  const fecha = m[1];
-  const restMultiline = m[2];
-  const restoUnaLinea = restMultiline
-    .split(/\n/)
-    .map((x) => x.trim())
-    .filter(Boolean)
-    .join(' ')
+function normalizarTextoCartola(texto) {
+  return String(texto || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\r/g, ' ')
+    .replace(/\n/g, ' ')
     .replace(/\s+/g, ' ')
-    .trim();
-  const alt = parseRestoLinea(restoUnaLinea);
-  if (!alt || !alt.descripcion) return null;
-  const es_cheque = /cheque/i.test(alt.descripcion) || /cheque/i.test(restMultiline);
-  const cargoNum = alt.cargo ? parseInt(String(alt.cargo).replace(/\./g, ''), 10) : null;
-  return {
-    fecha,
-    descripcion: alt.descripcion.slice(0, 500),
-    nro_documento: alt.nro_documento,
-    cargo_fmt: alt.cargo,
-    abono_fmt: alt.abono,
-    saldo_fmt: alt.saldo,
-    cargo_aprox: Number.isFinite(cargoNum) ? cargoNum : null,
-    es_cheque,
-  };
+    .trim()
 }
 
+function descripcionDesdeBloque(bloque, fecha, nro) {
+  const i = bloque.indexOf(fecha)
+  const j = bloque.indexOf(nro, i >= 0 ? i + fecha.length : 0)
+  if (i < 0 || j < 0) return 'Cheque'
+  return bloque.slice(i + fecha.length, j).replace(/\s+/g, ' ').trim() || 'Cheque'
+}
+
+function montoAEntero(fmt) {
+  if (!fmt) return null
+  const n = parseInt(String(fmt).replace(/\./g, ''), 10)
+  return Number.isFinite(n) ? n : null
+}
+
+/**
+ * @param {string} textoPlanoPdf
+ */
 function parsearMovimientosCartolaPdfTexto(textoPlanoPdf) {
-  const bloques = bloquesPorMovimiento(textoPlanoPdf);
-  const out = [];
-  for (const b of bloques) {
-    const mov = parseUnBloque(b);
-    if (mov) out.push(mov);
+  const texto = normalizarTextoCartola(textoPlanoPdf)
+  if (!texto) return []
+
+  const out = []
+  const seen = new Set()
+  const re = new RegExp(RE_CHEQUE_BANCO_CHILE.source, 'gi')
+  let m
+
+  while ((m = re.exec(texto)) !== null) {
+    const fecha = m[1]
+    const nro_documento = m[2]
+    const montoCol = m[3]
+    const saldo_fmt = m[4]
+    const bloque = m[0]
+    const key = `${fecha}|${nro_documento}|${montoCol}|${saldo_fmt}`
+    if (seen.has(key)) continue
+    seen.add(key)
+
+    const descripcion = descripcionDesdeBloque(bloque, fecha, nro_documento)
+    const esCobrado = /cobrado/i.test(bloque)
+
+    out.push({
+      fecha,
+      descripcion: descripcion.slice(0, 500),
+      nro_documento,
+      cargo_fmt: esCobrado ? null : montoCol,
+      abono_fmt: esCobrado ? montoCol : null,
+      saldo_fmt,
+      cargo_aprox: esCobrado ? null : montoAEntero(montoCol),
+      es_cheque: true,
+    })
   }
-  return out;
+
+  return out
 }
 
 function movimientosChequeDeCartola(movs) {
-  return (movs || []).filter((m) => m.es_cheque && m.nro_documento);
+  return (movs || []).filter((m) => m.es_cheque && m.nro_documento)
 }
 
 module.exports = {
   parsearMovimientosCartolaPdfTexto,
   movimientosChequeDeCartola,
-};
+}
