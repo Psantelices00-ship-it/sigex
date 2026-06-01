@@ -5,6 +5,7 @@ const multer = require('multer');
 const uploadToCloudinary = require('../cloudinary_upload');
 const { streamRemoteFileToResponse } = require('../streamRemoteFile');
 const ESTABLECIMIENTOS_RBD = require('../lib/establecimientosRbd');
+const { puedeEliminarSolicitud, puedeEditarSolicitud, solicitudAsociadaACompra } = require('../lib/solicitudesPermisos');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
@@ -292,13 +293,83 @@ router.patch('/:id', auth, async (req, res) => {
       numero_vinculacion,
       origen_area: origenBody,
       establecimiento,
+      descripcion,
+      solicitante,
+      tipo_gasto,
+      monto,
+      prioridad,
+      fecha_ingreso,
     } = req.body;
     const prev = await db.query('SELECT * FROM solicitudes WHERE id = $1', [req.params.id]);
     if (!prev.rows.length) return res.status(404).json({ error: 'No encontrado' });
     const p = prev.rows[0];
+    const enExpediente = solicitudAsociadaACompra(p);
+
+    const CAMPOS_CONTENIDO = new Set([
+      'descripcion',
+      'solicitante',
+      'tipo_gasto',
+      'monto',
+      'prioridad',
+      'fecha_ingreso',
+      'observaciones',
+      'numero_vinculacion',
+      'origen_area',
+      'establecimiento',
+    ]);
+    const pideContenido = [...CAMPOS_CONTENIDO].some((k) => req.body[k] !== undefined);
+    if (pideContenido) {
+      if (!puedeEditarSolicitud(req.user.rol)) {
+        return res.status(403).json({
+          error: 'Solo Super Admin o Secretaría de Administración pueden editar solicitudes',
+        });
+      }
+      if (enExpediente) {
+        return res.status(400).json({
+          error: 'No se puede editar: la solicitud ya está asociada a un expediente de compra',
+          expediente_id: p.expediente_id,
+        });
+      }
+    }
+
+    const toNum = (v) => {
+      if (v === '' || v == null) return 0;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+
     const updates = [];
     const params = [];
     let i = 1;
+    if (descripcion !== undefined) {
+      if (!String(descripcion).trim()) return res.status(400).json({ error: 'La descripción es obligatoria' });
+      updates.push(`descripcion = $${i++}`);
+      params.push(String(descripcion).trim());
+    }
+    if (solicitante !== undefined) {
+      if (!String(solicitante).trim()) return res.status(400).json({ error: 'El solicitante es obligatorio' });
+      updates.push(`solicitante = $${i++}`);
+      params.push(String(solicitante).trim().slice(0, 100));
+    }
+    if (tipo_gasto !== undefined) {
+      updates.push(`tipo_gasto = $${i++}`);
+      params.push(tipo_gasto || null);
+    }
+    if (monto !== undefined) {
+      const m = toNum(monto);
+      if (m < 0) return res.status(400).json({ error: 'El monto debe ser 0 o mayor' });
+      updates.push(`monto = $${i++}`);
+      params.push(m);
+    }
+    if (prioridad !== undefined) {
+      updates.push(`prioridad = $${i++}`);
+      params.push(prioridad || 'Normal');
+    }
+    if (fecha_ingreso !== undefined) {
+      if (!fecha_ingreso) return res.status(400).json({ error: 'La fecha de ingreso es obligatoria' });
+      updates.push(`fecha_ingreso = $${i++}`);
+      params.push(fecha_ingreso);
+    }
     if (estado !== undefined) {
       if (!ESTADOS_VALIDOS.has(estado)) {
         return res.status(400).json({ error: `Estado no válido. Use: ${[...ESTADOS_VALIDOS].join(', ')}` });
@@ -375,6 +446,9 @@ router.patch('/:id', auth, async (req, res) => {
     const notas = [];
     if (estado !== undefined && estado !== p.estado) notas.push(`Estado: ${p.estado} → ${estado}`);
     if (modulo_destino !== undefined) notas.push(`Módulo destino: ${modulo_destino || '—'}`);
+    if (descripcion !== undefined) notas.push('Descripción actualizada');
+    if (solicitante !== undefined) notas.push('Solicitante actualizado');
+    if (monto !== undefined) notas.push(`Monto: ${p.monto} → ${toNum(monto)}`);
     if (numero_vinculacion !== undefined) notas.push('N° vinculación actualizado');
     if (origenBody !== undefined || establecimiento !== undefined) notas.push(`Origen / establecimiento actualizado`);
     await logHistorial(req.params.id, req.user.login, 'Solicitud actualizada', notas.join(' · ') || 'Cambios registrados', 'edicion', null);
@@ -386,18 +460,20 @@ router.patch('/:id', auth, async (req, res) => {
 
 router.delete('/:id', auth, async (req, res) => {
   try {
-    if (req.user.rol !== 'Super Admin') {
-      return res.status(403).json({ error: 'Solo Super Admin puede eliminar solicitudes' });
+    if (!puedeEliminarSolicitud(req.user.rol)) {
+      return res.status(403).json({
+        error: 'Solo Super Admin o Secretaría de Administración pueden eliminar solicitudes',
+      });
     }
     const prev = await db.query(
       'SELECT id, numero, expediente_id FROM solicitudes WHERE id = $1',
       [req.params.id]
     );
     if (!prev.rows.length) return res.status(404).json({ error: 'No encontrada' });
-    if (prev.rows[0].expediente_id) {
+    if (solicitudAsociadaACompra(prev.rows[0])) {
       return res.status(400).json({
         error:
-          'No se puede eliminar: la solicitud está incorporada en un expediente de compra. Desvinculá desde Compras si corresponde.',
+          'No se puede eliminar: la solicitud está asociada a un expediente de compra. Desvinculá desde Compras si corresponde.',
         expediente_id: prev.rows[0].expediente_id,
       });
     }
