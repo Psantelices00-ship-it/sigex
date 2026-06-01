@@ -4,6 +4,11 @@ const auth = require('../middleware/auth');
 const multer = require('multer');
 const uploadToCloudinary = require('../cloudinary_upload');
 const { streamRemoteFileToResponse } = require('../streamRemoteFile');
+const {
+  puedeEditarHonorario,
+  diffHonorario,
+  registrarAuditoriaHonorario,
+} = require('../lib/honorarioAuditoria');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
@@ -140,18 +145,84 @@ router.post('/', auth, async (req, res) => {
   }
 });
 
+function rutQuitarFormato(rut) {
+  return String(rut || '')
+    .replace(/\./g, '')
+    .replace(/-/g, '')
+    .trim()
+    .toUpperCase();
+}
+
+function rutDvEsperado(cuerpo) {
+  let suma = 0;
+  let mul = 2;
+  for (let i = cuerpo.length - 1; i >= 0; i--) {
+    suma += Number(cuerpo[i]) * mul;
+    mul = mul === 7 ? 2 : mul + 1;
+  }
+  const resto = 11 - (suma % 11);
+  if (resto === 11) return '0';
+  if (resto === 10) return 'K';
+  return String(resto);
+}
+
+function validarRutChileno(rut) {
+  const limpio = rutQuitarFormato(rut);
+  if (!/^\d{7,8}[0-9K]$/.test(limpio)) return false;
+  return rutDvEsperado(limpio.slice(0, -1)) === limpio.slice(-1);
+}
+
+const ESTADOS_HONORARIO = ['Vigente', 'Suspendido', 'Terminado', 'En Renovación'];
+
 async function updateHonorario(req, res) {
   try {
+    if (!puedeEditarHonorario(req.user)) {
+      return res.status(403).json({ error: 'Sin permisos para editar encargos de honorarios' });
+    }
     const prev = await db.query('SELECT * FROM honorarios WHERE id=$1', [req.params.id]);
     if (!prev.rows.length) return res.status(404).json({ error: 'No encontrado' });
+    const before = prev.rows[0];
+
+    const body = req.body || {};
+    if (body.profesional !== undefined && !String(body.profesional).trim()) {
+      return res.status(400).json({ error: 'El nombre del profesional es obligatorio' });
+    }
+    if (body.rut_profesional !== undefined) {
+      const rut = String(body.rut_profesional).trim();
+      if (!rut) return res.status(400).json({ error: 'El RUT es obligatorio' });
+      if (!validarRutChileno(rut)) return res.status(400).json({ error: 'RUT inválido' });
+      body.rut_profesional = rut;
+    }
+    if (body.monto_mensual !== undefined) {
+      const m = Number(body.monto_mensual);
+      if (!Number.isFinite(m) || m <= 0) {
+        return res.status(400).json({ error: 'El monto mensual debe ser mayor a cero' });
+      }
+      body.monto_mensual = m;
+    }
+    if (body.fecha_inicio !== undefined && body.fecha_termino !== undefined) {
+      if (!body.fecha_inicio || !body.fecha_termino) {
+        return res.status(400).json({ error: 'Las fechas de vigencia son obligatorias' });
+      }
+      if (String(body.fecha_inicio) >= String(body.fecha_termino)) {
+        return res.status(400).json({ error: 'La fecha de inicio debe ser anterior al término' });
+      }
+    }
+    if (body.objeto !== undefined && !String(body.objeto).trim()) {
+      return res.status(400).json({ error: 'La descripción del servicio es obligatoria' });
+    }
+    if (body.estado !== undefined && !ESTADOS_HONORARIO.includes(String(body.estado).trim())) {
+      return res.status(400).json({ error: 'Estado no válido' });
+    }
+
     const fields = ['nombre', 'objeto', 'profesional', 'rut_profesional', 'monto_mensual', 'moneda', 'fecha_inicio', 'fecha_termino', 'area', 'observaciones', 'estado'];
     const updates = [];
     const params = [];
     let i = 1;
     for (const f of fields) {
-      if (req.body[f] !== undefined) {
+      if (body[f] !== undefined) {
         updates.push(`${f} = $${i++}`);
-        params.push(req.body[f]);
+        params.push(body[f]);
       }
     }
     if (!updates.length) return res.status(400).json({ error: 'Nada que actualizar' });
@@ -161,7 +232,10 @@ async function updateHonorario(req, res) {
       `UPDATE honorarios SET ${updates.join(', ')} WHERE id=$${params.length} RETURNING *`,
       params
     );
-    res.json(result.rows[0]);
+    const after = result.rows[0];
+    const cambios = diffHonorario(before, after, fields);
+    await registrarAuditoriaHonorario(db, req.params.id, req.user?.login || req.user?.nombre, cambios);
+    res.json(after);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -278,6 +352,53 @@ router.patch('/:id/pagos/:pagoId/archivo', auth, async (req, res) => {
   }
 });
 
+router.patch('/:id/pagos/:pagoId', auth, async (req, res) => {
+  try {
+    const prev = await db.query('SELECT id FROM honorarios_pagos WHERE id=$1 AND honorario_id=$2', [
+      req.params.pagoId,
+      req.params.id,
+    ]);
+    if (!prev.rows.length) return res.status(404).json({ error: 'Período no encontrado' });
+    const updates = [];
+    const params = [];
+    let i = 1;
+    if (req.body.monto !== undefined) {
+      updates.push(`monto = $${i++}`);
+      params.push(Number(req.body.monto) || 0);
+    }
+    if (req.body.observaciones !== undefined) {
+      updates.push(`observaciones = $${i++}`);
+      params.push(typeof req.body.observaciones === 'string' ? req.body.observaciones.trim() || null : null);
+    }
+    if (req.body.estado !== undefined) {
+      updates.push(`estado = $${i++}`);
+      params.push(String(req.body.estado).trim() || 'Pendiente');
+    }
+    if (!updates.length) return res.status(400).json({ error: 'Nada que actualizar' });
+    params.push(req.params.pagoId, req.params.id);
+    const result = await db.query(
+      `UPDATE honorarios_pagos SET ${updates.join(', ')} WHERE id=$${i++} AND honorario_id=$${i} RETURNING *`,
+      params
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/:id/pagos/:pagoId', auth, async (req, res) => {
+  try {
+    const row = await db.query(
+      'DELETE FROM honorarios_pagos WHERE id=$1 AND honorario_id=$2 RETURNING id',
+      [req.params.pagoId, req.params.id]
+    );
+    if (!row.rows.length) return res.status(404).json({ error: 'Período no encontrado' });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.delete('/:id/documentos/:docId', auth, async (req, res) => {
   try {
     const row = await db.query('DELETE FROM honorarios_documentos WHERE id=$1 AND honorario_id=$2 RETURNING id', [
@@ -306,9 +427,13 @@ router.delete('/:id/pagos/:pagoId/documentos/:docId', auth, async (req, res) => 
 
 router.delete('/:id', auth, async (req, res) => {
   try {
-    if (req.user.rol !== 'Super Admin') return res.status(403).json({ error: 'Sin permisos' });
+    if (!puedeEditarHonorario(req.user)) {
+      return res.status(403).json({ error: 'Sin permisos para eliminar encargos de honorarios' });
+    }
+    const prev = await db.query('SELECT id, numero, nombre FROM honorarios WHERE id=$1', [req.params.id]);
+    if (!prev.rows.length) return res.status(404).json({ error: 'No encontrado' });
     await db.query('DELETE FROM honorarios WHERE id=$1', [req.params.id]);
-    res.json({ ok: true });
+    res.json({ ok: true, id: req.params.id, numero: prev.rows[0].numero });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
