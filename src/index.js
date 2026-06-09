@@ -18,6 +18,7 @@ app.use('/api/contratos',   require('./routes/contratos'));
 app.use('/api/compras',     require('./routes/compras'));
 app.use('/api/correspondencia', require('./routes/correspondencia'));
 app.use('/api/remuneraciones', require('./routes/remuneraciones'));
+app.use('/api/personal', require('./routes/personal'));
 app.use('/api/honorarios',  require('./routes/honorarios'));
 app.use('/api/cheques',     require('./routes/cheques'));
 app.use('/api/caja-chica',  require('./routes/caja-chica'));
@@ -29,7 +30,7 @@ app.get('/', (req, res) =>
   res.json({
     sistema: 'SIGEX',
     version: '1.1.0',
-    build: '2026-05-26-cheques',
+    build: '2026-06-09-caja-chica-patch-gastos',
     estado: 'activo',
     modulos: [
       'auth',
@@ -41,6 +42,7 @@ app.get('/', (req, res) =>
       'contratos',
       'correspondencia',
       'remuneraciones',
+      'personal',
       'honorarios',
       'cheques',
       'caja-chica',
