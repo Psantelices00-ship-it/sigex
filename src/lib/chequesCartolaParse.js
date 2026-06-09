@@ -1,11 +1,16 @@
 /**
- * Parser para cartolas Banco de Chile extraídas con pdf-parse.
+ * Parser para cartolas Banco de Chile extraídas con pdf-parse (sin espacios entre columnas).
  * Formato típico (una línea larga por página):
  *   DD/MM/AAAA Cheque Pagado|Cobrado ... sucursal N°cheque cargo saldo
  */
 
-const RE_CHEQUE_BANCO_CHILE =
-  /(\d{2}\/\d{2}\/\d{4})\s+Cheque[^2]*?(21\d{5})\s+([\d.]+)\s+([\d.]+)/gi
+/** Montos CLP: 81.320 o 3.242.668.182 (pdf-parse los pega al N° cheque sin espacios). */
+const RE_MONTO_CLP = String.raw`\d{1,3}(?:\.\d{3})+|\d+`
+
+const RE_CHEQUE_BANCO_CHILE = new RegExp(
+  String.raw`(\d{2}/\d{2}/\d{4})\s*Cheque[^2]*?(21\d{5})\s*(${RE_MONTO_CLP})\s*(${RE_MONTO_CLP})`,
+  'gi'
+)
 
 function normalizarTextoCartola(texto) {
   return String(texto || '')
@@ -73,7 +78,19 @@ function movimientosChequeDeCartola(movs) {
   return (movs || []).filter((m) => m.es_cheque && m.nro_documento)
 }
 
+/** Convierte fecha de cartola (DD/MM/YYYY) a YYYY-MM-DD para columnas DATE en PostgreSQL. */
+function fechaCartolaAIsoDate(fecha) {
+  if (fecha == null || fecha === '') return null
+  const raw = String(fecha).trim()
+  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`
+  const cl = raw.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})/)
+  if (cl) return `${cl[3]}-${cl[2]}-${cl[1]}`
+  return null
+}
+
 module.exports = {
   parsearMovimientosCartolaPdfTexto,
   movimientosChequeDeCartola,
+  fechaCartolaAIsoDate,
 }
