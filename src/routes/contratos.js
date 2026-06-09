@@ -12,6 +12,7 @@ const {
   computeMotherChecklist,
   computeMonthlyPagoChecklist,
 } = require('../lib/contratoWorkflow');
+const { requireEditarRegistro } = require('../lib/registroEdicionPermisos');
 
 const uploadToCloudinary = require('../cloudinary_upload');
 
@@ -341,6 +342,127 @@ router.post('/:id/pagos/:pagoId/documentos', auth, upload.single('archivo'), asy
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
+// Editar datos del contrato (admin / secretaría)
+router.patch('/:id', auth, async (req, res) => {
+  try {
+    if (!requireEditarRegistro(req, res)) return;
+    const prev = await db.query('SELECT * FROM contratos WHERE id=$1', [req.params.id]);
+    if (!prev.rows.length) return res.status(404).json({ error: 'No encontrado' });
+    const before = prev.rows[0];
+    const body = req.body || {};
+
+    if (body.nombre !== undefined && !String(body.nombre).trim()) {
+      return res.status(400).json({ error: 'Nombre es obligatorio' });
+    }
+    if (body.proveedor !== undefined && !String(body.proveedor).trim()) {
+      return res.status(400).json({ error: 'Proveedor es obligatorio' });
+    }
+    if (body.area !== undefined && !String(body.area).trim()) {
+      return res.status(400).json({ error: 'Área es obligatoria' });
+    }
+    if (body.objeto !== undefined && !String(body.objeto).trim()) {
+      return res.status(400).json({ error: 'Objeto / descripción es obligatorio' });
+    }
+    if (body.moneda !== undefined && !['CLP', 'UF', 'USD'].includes(body.moneda)) {
+      return res.status(400).json({ error: 'Moneda no válida' });
+    }
+    if (body.estado !== undefined) {
+      const estados = ['Vigente', 'Suspendido', 'Terminado', 'En Renovación'];
+      if (!estados.includes(String(body.estado).trim())) {
+        return res.status(400).json({ error: 'Estado no válido' });
+      }
+    }
+    const fi = body.fecha_inicio !== undefined ? body.fecha_inicio || null : before.fecha_inicio;
+    const ft = body.fecha_termino !== undefined ? body.fecha_termino || null : before.fecha_termino;
+    if (fi && ft && String(fi) >= String(ft)) {
+      return res.status(400).json({ error: 'La fecha de inicio debe ser anterior al término' });
+    }
+
+    const toNum = (v, fallback) => {
+      if (v === undefined) return fallback;
+      if (v === '' || v == null) return 0;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : fallback;
+    };
+
+    const fields = [
+      'nombre',
+      'proveedor',
+      'rut_proveedor',
+      'monto_total',
+      'monto_mensual',
+      'moneda',
+      'fecha_inicio',
+      'fecha_termino',
+      'area',
+      'objeto',
+      'observaciones',
+      'estado',
+    ];
+    const next = {
+      nombre: body.nombre !== undefined ? String(body.nombre).trim() : before.nombre,
+      proveedor: body.proveedor !== undefined ? String(body.proveedor).trim() : before.proveedor,
+      rut_proveedor:
+        body.rut_proveedor !== undefined
+          ? body.rut_proveedor
+            ? String(body.rut_proveedor).trim()
+            : null
+          : before.rut_proveedor,
+      monto_total: toNum(body.monto_total, before.monto_total),
+      monto_mensual: toNum(body.monto_mensual, before.monto_mensual),
+      moneda: body.moneda !== undefined ? body.moneda : before.moneda,
+      fecha_inicio: fi,
+      fecha_termino: ft,
+      area: body.area !== undefined ? String(body.area).trim() : before.area,
+      objeto: body.objeto !== undefined ? String(body.objeto).trim() : before.objeto,
+      observaciones:
+        body.observaciones !== undefined
+          ? body.observaciones
+            ? String(body.observaciones).trim()
+            : null
+          : before.observaciones,
+      estado: body.estado !== undefined ? String(body.estado).trim() : before.estado,
+    };
+
+    const result = await db.query(
+      `UPDATE contratos SET
+        nombre=$1, proveedor=$2, rut_proveedor=$3, monto_total=$4, monto_mensual=$5,
+        moneda=$6, fecha_inicio=$7, fecha_termino=$8, area=$9, objeto=$10,
+        observaciones=$11, estado=$12, updated_at=NOW()
+       WHERE id=$13 RETURNING *`,
+      [
+        next.nombre,
+        next.proveedor,
+        next.rut_proveedor,
+        next.monto_total,
+        next.monto_mensual,
+        next.moneda,
+        next.fecha_inicio,
+        next.fecha_termino,
+        next.area,
+        next.objeto,
+        next.observaciones,
+        next.estado,
+        req.params.id,
+      ]
+    );
+
+    const cambios = fields.filter((f) => String(before[f] ?? '') !== String(next[f] ?? ''));
+    if (cambios.length) {
+      await db.query('INSERT INTO contratos_historial (contrato_id,usuario,accion,nota,tipo) VALUES ($1,$2,$3,$4,$5)', [
+        req.params.id,
+        req.user.login,
+        'Datos del contrato editados',
+        cambios.join(', '),
+        'edicion',
+      ]);
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Cambiar estado contrato
 router.patch('/:id/estado', auth, async (req, res) => {
   try {
@@ -351,6 +473,70 @@ router.patch('/:id/estado', auth, async (req, res) => {
       [req.params.id, req.user.login, 'Cambio de estado', `${prev.rows[0]?.estado} → ${estado}${comentario?' · '+comentario:''}`, 'estado']);
     res.json({ ok: true });
   } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// Editar monto / observaciones de pago mensual (admin / secretaría)
+router.patch('/:id/pagos/:pagoId', auth, async (req, res) => {
+  try {
+    if (!requireEditarRegistro(req, res)) return;
+    const prev = await db.query('SELECT * FROM contratos_pagos WHERE id=$1 AND contrato_id=$2', [
+      req.params.pagoId,
+      req.params.id,
+    ]);
+    if (!prev.rows.length) return res.status(404).json({ error: 'Pago no encontrado' });
+    const before = prev.rows[0];
+    const updates = [];
+    const params = [];
+    let i = 1;
+    if (req.body.monto !== undefined) {
+      const m = Number(req.body.monto);
+      if (!Number.isFinite(m) || m < 0) return res.status(400).json({ error: 'Monto inválido' });
+      updates.push(`monto = $${i++}`);
+      params.push(m);
+    }
+    if (req.body.observaciones !== undefined) {
+      updates.push(`observaciones = $${i++}`);
+      params.push(
+        typeof req.body.observaciones === 'string' ? req.body.observaciones.trim() || null : null
+      );
+    }
+    if (req.body.estado !== undefined) {
+      const est = String(req.body.estado).trim();
+      if (!['Pendiente', 'Pagado'].includes(est)) {
+        return res.status(400).json({ error: 'Estado de pago no válido' });
+      }
+      updates.push(`estado = $${i++}`);
+      params.push(est);
+    }
+    if (!updates.length) return res.status(400).json({ error: 'Nada que actualizar' });
+    params.push(req.params.pagoId, req.params.id);
+    const result = await db.query(
+      `UPDATE contratos_pagos SET ${updates.join(', ')} WHERE id=$${i++} AND contrato_id=$${i} RETURNING *`,
+      params
+    );
+    const notas = [];
+    if (req.body.monto !== undefined && String(before.monto) !== String(result.rows[0].monto)) {
+      notas.push(`monto: ${before.monto} → ${result.rows[0].monto}`);
+    }
+    if (req.body.observaciones !== undefined && String(before.observaciones ?? '') !== String(result.rows[0].observaciones ?? '')) {
+      notas.push('observaciones actualizadas');
+    }
+    if (req.body.estado !== undefined && before.estado !== result.rows[0].estado) {
+      notas.push(`estado: ${before.estado} → ${result.rows[0].estado}`);
+    }
+    if (notas.length) {
+      await db.query('INSERT INTO contratos_historial (contrato_id,usuario,accion,nota,tipo) VALUES ($1,$2,$3,$4,$5)', [
+        req.params.id,
+        req.user.login,
+        'Pago mensual editado',
+        `${before.periodo || 'Período'} · ${notas.join('; ')}`,
+        'edicion',
+      ]);
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Registrar archivo físico de pago mensual

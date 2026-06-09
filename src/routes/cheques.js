@@ -4,7 +4,12 @@ const auth = require('../middleware/auth');
 const multer = require('multer');
 const uploadToCloudinary = require('../cloudinary_upload');
 const { streamRemoteFileToResponse } = require('../streamRemoteFile');
-const { parsearMovimientosCartolaPdfTexto, movimientosChequeDeCartola } = require('../lib/chequesCartolaParse');
+const {
+  parsearMovimientosCartolaPdfTexto,
+  movimientosChequeDeCartola,
+  fechaCartolaAIsoDate,
+} = require('../lib/chequesCartolaParse');
+const { requireEditarRegistro } = require('../lib/registroEdicionPermisos');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
@@ -19,6 +24,23 @@ function mismoNumCheque(registrado, cartolaDoc) {
   if (!a || !b) return false;
   if (a === b) return true;
   return normDig(a) === normDig(b);
+}
+
+function parseMovimientosCartolaGuardados(raw) {
+  if (raw == null) return [];
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'object') return Array.isArray(raw) ? raw : [];
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    if (!t) return [];
+    try {
+      const v = JSON.parse(t);
+      return Array.isArray(v) ? v : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
 }
 
 async function textoDesdePdfBuffer(buf) {
@@ -151,22 +173,101 @@ router.post('/emitidos', auth, async (req, res) => {
 
 router.patch('/emitidos/:id', auth, async (req, res) => {
   try {
+    if (!requireEditarRegistro(req, res)) return;
     const prev = await db.query('SELECT * FROM cheques_emitidos WHERE id=$1', [req.params.id]);
     if (!prev.rows.length) return res.status(404).json({ error: 'Cheque no encontrado' });
     const o = req.body || {};
-    const estado = ['anulado', 'emitido', 'cobrado'].includes(o.estado) ? o.estado : prev.rows[0].estado;
+    const prevRow = prev.rows[0];
+
+    let beneficiario = prevRow.beneficiario;
+    if (o.beneficiario !== undefined) {
+      beneficiario = String(o.beneficiario || '').trim();
+      if (!beneficiario) return res.status(400).json({ error: 'El beneficiario es obligatorio' });
+    }
+
+    let fecha_emision = prevRow.fecha_emision;
+    if (o.fecha_emision !== undefined) {
+      fecha_emision = String(o.fecha_emision || '').slice(0, 10);
+      if (!fecha_emision) return res.status(400).json({ error: 'La fecha de emisión es obligatoria' });
+    }
+
+    let numero_cheque = prevRow.numero_cheque;
+    if (o.numero_cheque !== undefined) {
+      numero_cheque = String(o.numero_cheque || '').trim().replace(/\s/g, '');
+      if (!numero_cheque) return res.status(400).json({ error: 'El N° de cheque es obligatorio' });
+    }
+
+    let tipo_pago = prevRow.tipo_pago;
+    if (o.tipo_pago !== undefined) {
+      let t = String(o.tipo_pago || 'OTRO').toUpperCase();
+      if (!['REMUNERACION', 'PREVISIONAL', 'OTRO'].includes(t)) t = 'OTRO';
+      tipo_pago = t;
+    }
+
+    let talonario_id = prevRow.talonario_id;
+    if (o.talonario_id !== undefined) {
+      talonario_id = o.talonario_id || null;
+    }
+    if (talonario_id) {
+      const tal = await db.query('SELECT * FROM cheques_talonarios WHERE id=$1', [talonario_id]);
+      if (!tal.rows.length) return res.status(400).json({ error: 'Talonario no encontrado' });
+      const n = parseInt(String(numero_cheque).replace(/\D/g, ''), 10);
+      const t = tal.rows[0];
+      if (!Number.isFinite(n) || n < t.numero_desde || n > t.numero_hasta) {
+        return res.status(400).json({ error: 'El N° está fuera del talonario' });
+      }
+    }
+
+    let monto = prevRow.monto;
+    if (o.monto !== undefined) {
+      if (o.monto === '' || o.monto == null) monto = null;
+      else {
+        const n = Number(o.monto);
+        if (!Number.isFinite(n)) return res.status(400).json({ error: 'Monto inválido' });
+        monto = n;
+      }
+    }
+
+    let banco_emisor = prevRow.banco_emisor;
+    if (o.banco_emisor !== undefined) {
+      banco_emisor = typeof o.banco_emisor === 'string' ? o.banco_emisor.trim() || null : null;
+    }
+
+    let observacion = prevRow.observacion;
+    if (o.observacion !== undefined) {
+      observacion = typeof o.observacion === 'string' ? o.observacion.trim() || null : null;
+    }
+
+    let estado = prevRow.estado;
+    if (o.estado !== undefined) {
+      if (!['anulado', 'emitido', 'cobrado'].includes(o.estado)) {
+        return res.status(400).json({ error: 'Estado no válido' });
+      }
+      estado = o.estado;
+    }
+
     const result = await db.query(
       `UPDATE cheques_emitidos SET
-        estado=$1,
-        observacion=COALESCE($2, observacion),
-        banco_emisor=COALESCE($3, banco_emisor),
-        monto=COALESCE($4, monto)
-       WHERE id=$5 RETURNING *`,
+        talonario_id=$1,
+        numero_cheque=$2,
+        fecha_emision=$3,
+        beneficiario=$4,
+        tipo_pago=$5,
+        monto=$6,
+        banco_emisor=$7,
+        observacion=$8,
+        estado=$9
+       WHERE id=$10 RETURNING *`,
       [
+        talonario_id,
+        numero_cheque,
+        fecha_emision,
+        beneficiario,
+        tipo_pago,
+        monto,
+        banco_emisor,
+        observacion,
         estado,
-        typeof o.observacion === 'string' ? o.observacion.trim() || null : prev.rows[0].observacion,
-        typeof o.banco_emisor === 'string' ? o.banco_emisor.trim() || null : prev.rows[0].banco_emisor,
-        o.monto != null && Number.isFinite(Number(o.monto)) ? Number(o.monto) : prev.rows[0].monto,
         req.params.id,
       ]
     );
@@ -184,7 +285,7 @@ router.post('/cartolas', auth, upload.single('archivo'), async (req, res) => {
     const buf = req.file.buffer;
     const nombre = String(req.body.nombre || 'Cartola').trim();
     const texto = await textoDesdePdfBuffer(buf);
-    const movimientos_parseados = parsearMovimientosCartolaPdfTexto(texto);
+    const movimientos_parseados = parsearMovimientosCartolaPdfTexto(texto) || [];
     const movsCheque = movimientosChequeDeCartola(movimientos_parseados);
     const fname = `${Date.now()}-cartola.pdf`;
     const uploaded = await uploadToCloudinary(buf, fname, 'cheques/cartolas', {
@@ -201,7 +302,7 @@ router.post('/cartolas', auth, upload.single('archivo'), async (req, res) => {
         buf.length,
         movimientos_parseados.length,
         movsCheque.length,
-        movimientos_parseados,
+        JSON.stringify(movimientos_parseados),
       ]
     );
     res.status(201).json(ins.rows[0]);
@@ -211,15 +312,24 @@ router.post('/cartolas', auth, upload.single('archivo'), async (req, res) => {
 });
 
 router.post('/conciliar', auth, async (req, res) => {
+  const cartolaId = req.body?.cartola_id;
+  if (!cartolaId) {
+    return res.status(400).json({ error: 'Falta cartola_id en el cuerpo de la solicitud' });
+  }
+
   try {
-    const cartolaId = req.body.cartola_id;
     const cart = await db.query('SELECT * FROM cheques_cartolas WHERE id=$1', [cartolaId]);
     if (!cart.rows.length) return res.status(404).json({ error: 'Cartola no encontrada' });
     const cartola = cart.rows[0];
-    const movs = Array.isArray(cartola.movimientos_parseados)
-      ? cartola.movimientos_parseados
-      : JSON.parse(cartola.movimientos_parseados || '[]');
+    const movs = parseMovimientosCartolaGuardados(cartola.movimientos_parseados);
     const movsChq = movimientosChequeDeCartola(movs);
+    if (!movsChq.length) {
+      return res.status(400).json({
+        error: 'La cartola no tiene movimientos de cheque parseados. Volvé a importar el PDF.',
+        movimientos_total: movs.length,
+      });
+    }
+
     const emitidosRes = await db.query("SELECT * FROM cheques_emitidos WHERE estado = 'emitido'");
     const matchedPairs = [];
     const emitidosUsados = new Set();
@@ -233,16 +343,21 @@ router.post('/conciliar', auth, async (req, res) => {
       if (!e) continue;
       emitidosUsados.add(e.id);
       movsUsados.add(mkMovKey(m));
+      const fechaCobroIso = fechaCartolaAIsoDate(m.fecha);
+      if (m.fecha && !fechaCobroIso) {
+        console.warn('[cheques/conciliar] fecha no convertida', m.nro_documento, m.fecha);
+      }
       const match = {
         nro_documento: m.nro_documento,
         fecha_movimiento: m.fecha,
+        fecha_cobro_iso: fechaCobroIso,
         descripcion_cartola: m.descripcion,
         cargo_fmt: m.cargo_fmt,
       };
       await db.query(
-        `UPDATE cheques_emitidos SET estado='cobrado', cartola_id=$1, fecha_cobro_cartola=$2, match_cartola=$3
+        `UPDATE cheques_emitidos SET estado='cobrado', cartola_id=$1, fecha_cobro_cartola=$2, match_cartola=$3::jsonb
          WHERE id=$4`,
-        [cartolaId, m.fecha, JSON.stringify(match), e.id]
+        [cartolaId, fechaCobroIso, JSON.stringify(match), e.id]
       );
       matchedPairs.push({ emitido_id: e.id, numero_cheque: e.numero_cheque, movimiento_cartola: m });
     }
@@ -265,13 +380,18 @@ router.post('/conciliar', auth, async (req, res) => {
       movimientos_cheque_en_cartola: movsChq.length,
       emitidos_sin_cobro_global: pendientes.rows[0]?.n ?? 0,
     };
-    await db.query('UPDATE cheques_cartolas SET resultado_conciliacion=$1 WHERE id=$2', [
+    await db.query('UPDATE cheques_cartolas SET resultado_conciliacion=$1::jsonb WHERE id=$2', [
       JSON.stringify(resultado),
       cartolaId,
     ]);
     res.json(resultado);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[cheques/conciliar]', cartolaId, err?.message, err?.stack);
+    res.status(500).json({
+      error: err.message || 'Error en conciliación',
+      code: 'CONCILIAR_ERROR',
+      cartola_id: cartolaId,
+    });
   }
 });
 

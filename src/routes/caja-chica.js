@@ -4,6 +4,7 @@ const auth = require('../middleware/auth');
 const multer = require('multer');
 const uploadToCloudinary = require('../cloudinary_upload');
 const { streamRemoteFileToResponse } = require('../streamRemoteFile');
+const { requireEditarRegistro } = require('../lib/registroEdicionPermisos');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
@@ -208,6 +209,75 @@ router.post('/:cajaId/periodos/:periodoId/giros', auth, async (req, res) => {
       [req.params.periodoId, Number.isFinite(monto) ? monto : 0, req.body.concepto || 'Reposición de fondos']
     );
     res.status(201).json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/:cajaId/periodos/:periodoId/gastos/:gastoId', auth, async (req, res) => {
+  try {
+    if (!requireEditarRegistro(req, res)) return;
+    const prev = await db.query(
+      `SELECT g.*, p.estado AS periodo_estado
+       FROM caja_chica_gastos g
+       JOIN caja_chica_periodos p ON p.id = g.periodo_id
+       WHERE g.id=$1 AND g.periodo_id=$2 AND p.caja_id=$3`,
+      [req.params.gastoId, req.params.periodoId, req.params.cajaId]
+    );
+    if (!prev.rows.length) return res.status(404).json({ error: 'Gasto no encontrado' });
+    const before = prev.rows[0];
+    const o = req.body || {};
+
+    let fecha = before.fecha;
+    if (o.fecha !== undefined) {
+      fecha = String(o.fecha || '').slice(0, 10);
+      if (!fecha) return res.status(400).json({ error: 'La fecha es obligatoria' });
+    }
+
+    let tipo_gasto = before.tipo_gasto;
+    if (o.tipo_gasto !== undefined) tipo_gasto = normTipoGasto(o.tipo_gasto);
+
+    let monto = before.monto;
+    if (o.monto !== undefined) {
+      const n = Number(o.monto);
+      if (!Number.isFinite(n) || n < 0) return res.status(400).json({ error: 'Monto inválido' });
+      monto = n;
+    }
+
+    const strField = (key, maxLen) => {
+      if (o[key] === undefined) return before[key] ?? '';
+      return String(o[key] ?? '').slice(0, maxLen);
+    };
+
+    const numero_boleta = strField('numero_boleta', 40);
+    const rut_proveedor = strField('rut_proveedor', 20);
+    const proveedor = strField('proveedor', 200);
+    const funcionario = strField('funcionario', 120);
+    const motivo_destino = strField('motivo_destino', 2000);
+    let concepto = before.concepto;
+    if (o.concepto !== undefined || o.motivo_destino !== undefined) {
+      concepto = String(o.concepto ?? o.motivo_destino ?? before.concepto ?? '').slice(0, 2000) || 'Gasto';
+    }
+
+    const result = await db.query(
+      `UPDATE caja_chica_gastos SET
+        fecha=$1, tipo_gasto=$2, numero_boleta=$3, rut_proveedor=$4, proveedor=$5,
+        funcionario=$6, motivo_destino=$7, concepto=$8, monto=$9
+       WHERE id=$10 RETURNING *`,
+      [
+        fecha,
+        tipo_gasto,
+        numero_boleta,
+        rut_proveedor,
+        proveedor,
+        funcionario,
+        motivo_destino,
+        concepto,
+        monto,
+        req.params.gastoId,
+      ]
+    );
+    res.json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
