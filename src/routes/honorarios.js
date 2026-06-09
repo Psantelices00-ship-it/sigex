@@ -354,6 +354,9 @@ router.patch('/:id/pagos/:pagoId/archivo', auth, async (req, res) => {
 
 router.patch('/:id/pagos/:pagoId', auth, async (req, res) => {
   try {
+    if (!puedeEditarHonorario(req.user)) {
+      return res.status(403).json({ error: 'Sin permisos para editar períodos de honorarios' });
+    }
     const prev = await db.query('SELECT id FROM honorarios_pagos WHERE id=$1 AND honorario_id=$2', [
       req.params.pagoId,
       req.params.id,
@@ -388,6 +391,9 @@ router.patch('/:id/pagos/:pagoId', auth, async (req, res) => {
 
 router.delete('/:id/pagos/:pagoId', auth, async (req, res) => {
   try {
+    if (!puedeEditarHonorario(req.user)) {
+      return res.status(403).json({ error: 'Sin permisos para eliminar períodos de honorarios' });
+    }
     const row = await db.query(
       'DELETE FROM honorarios_pagos WHERE id=$1 AND honorario_id=$2 RETURNING id',
       [req.params.pagoId, req.params.id]
