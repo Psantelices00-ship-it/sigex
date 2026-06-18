@@ -1,0 +1,122 @@
+const uploadToCloudinary = require('../cloudinary_upload');
+const db = require('../db');
+const { validatePersonalPdf } = require('./personalPdfValidate');
+const {
+  isTipoDocumentalValido,
+  cloudinaryFolder,
+  cloudinaryFilename,
+  calcularEstadoDocumento,
+  inferirTipoDocumentalDesdeNombre,
+  PERSONAL_DOC_TIPOS,
+} = require('./personalDocTypes');
+
+const ORDEN_TIPOS_IMPORT = PERSONAL_DOC_TIPOS.map((t) => t.key);
+
+/**
+ * Guarda un PDF en la carpeta del funcionario (reemplaza versión activa del mismo tipo).
+ * @param {object} opts
+ * @param {object} opts.funcionario fila personal_funcionarios
+ * @param {string} opts.tipo_documental
+ * @param {Buffer} opts.buffer
+ * @param {string} opts.originalname
+ * @param {string} opts.cargado_por
+ * @param {string|null} [opts.fecha_vencimiento]
+ * @param {boolean} [opts.asignacion_automatica]
+ */
+async function guardarDocumentoPersonal({
+  funcionario,
+  tipo_documental,
+  buffer,
+  originalname,
+  cargado_por,
+  fecha_vencimiento = null,
+  asignacion_automatica = false,
+}) {
+  if (!isTipoDocumentalValido(tipo_documental)) {
+    throw new Error('Tipo documental inválido');
+  }
+  const pdfErr = validatePersonalPdf(buffer, originalname, 'application/pdf');
+  if (pdfErr) throw new Error(pdfErr);
+
+  const fechaCarga = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const folder = cloudinaryFolder(funcionario.tipo_funcionario, funcionario.rut_normalizado, tipo_documental);
+  const fname = cloudinaryFilename(funcionario.rut_normalizado, tipo_documental, fechaCarga);
+
+  const uploaded = await uploadToCloudinary(buffer, fname, folder, {
+    mimetype: 'application/pdf',
+    originalname,
+  });
+
+  const prev = await db.query(
+    `SELECT id FROM personal_documentos WHERE funcionario_id = $1 AND tipo_documental = $2 AND es_activo = TRUE`,
+    [funcionario.id, tipo_documental]
+  );
+  if (prev.rows.length) {
+    await db.query(`UPDATE personal_documentos SET es_activo = FALSE WHERE id = $1`, [prev.rows[0].id]);
+  }
+
+  const verRow = await db.query(
+    `SELECT COALESCE(MAX(version_num), 0)::int AS mx FROM personal_documentos WHERE funcionario_id = $1 AND tipo_documental = $2`,
+    [funcionario.id, tipo_documental]
+  );
+  const versionNum = (verRow.rows[0]?.mx || 0) + 1;
+  const estado = fecha_vencimiento ? calcularEstadoDocumento(fecha_vencimiento) : 'vigente';
+
+  const result = await db.query(
+    `INSERT INTO personal_documentos
+      (funcionario_id, tipo_documental, version_num, es_activo, nombre_archivo, file_path, file_size,
+       mime_type, cloudinary_public_id, fecha_vencimiento, estado, cargado_por)
+     VALUES ($1,$2,$3,TRUE,$4,$5,$6,$7,$8,$9,$10,$11)
+     RETURNING *`,
+    [
+      funcionario.id,
+      tipo_documental,
+      versionNum,
+      fname,
+      uploaded.secure_url,
+      buffer.length,
+      'application/pdf',
+      uploaded.public_id || null,
+      fecha_vencimiento,
+      estado,
+      cargado_por,
+    ]
+  );
+
+  return {
+    documento: result.rows[0],
+    reemplazo: prev.rows.length > 0,
+    asignacion_automatica,
+  };
+}
+
+/** Tipos obligatorios aún sin documento activo. */
+async function tiposDisponiblesParaFuncionario(funcionarioId) {
+  const activos = await db.query(
+    `SELECT tipo_documental FROM personal_documentos WHERE funcionario_id = $1 AND es_activo = TRUE`,
+    [funcionarioId]
+  );
+  const usados = new Set(activos.rows.map((r) => r.tipo_documental));
+  return ORDEN_TIPOS_IMPORT.filter((k) => !usados.has(k));
+}
+
+/**
+ * Resuelve tipo documental: nombre de archivo o siguiente slot vacío.
+ * @returns {{ tipo: string|null, automatico: boolean }}
+ */
+async function resolverTipoDocumentalImport(funcionarioId, filename) {
+  const inferido = inferirTipoDocumentalDesdeNombre(filename);
+  if (inferido) return { tipo: inferido, automatico: false };
+
+  const disponibles = await tiposDisponiblesParaFuncionario(funcionarioId);
+  if (disponibles.length) return { tipo: disponibles[0], automatico: true };
+
+  return { tipo: null, automatico: false };
+}
+
+module.exports = {
+  guardarDocumentoPersonal,
+  tiposDisponiblesParaFuncionario,
+  resolverTipoDocumentalImport,
+  ORDEN_TIPOS_IMPORT,
+};

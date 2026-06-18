@@ -6,6 +6,14 @@ const {
   compararPlanillas,
   UMBRAL_GRANDE_DEFAULT,
 } = require('../lib/remuneracionCompareXlsx')
+const { requireAccesoPersonal } = require('../lib/personalPermisos')
+const personalDocumentos = require('./personalDocumentos')
+const personalImportaciones = require('./personalImportaciones')
+const personalFuncionarios = require('./personalFuncionarios')
+
+router.use(personalDocumentos)
+router.use(personalImportaciones)
+router.use(personalFuncionarios)
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -31,6 +39,7 @@ router.post(
   ]),
   async (req, res) => {
     try {
+      if (!requireAccesoPersonal(req, res)) return
       const fileA = req.files?.periodo_a?.[0]
       const fileB = req.files?.periodo_b?.[0]
 

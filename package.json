@@ -24,7 +24,8 @@
     "user:dev": "node scripts/crear-usuario-dev.js",
     "db:produccion:reset": "node scripts/produccion-reset.js",
     "db:produccion:admin": "node scripts/crear-admin-produccion.js",
-    "db:sql": "node scripts/run-sql-file.js"
+    "db:sql": "node scripts/run-sql-file.js",
+    "personal:import-carpetas": "node scripts/importar-carpetas-personal.js"
   },
   "dependencies": {
     "axios": "^1.16.0",
