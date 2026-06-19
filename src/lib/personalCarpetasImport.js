@@ -76,7 +76,8 @@ async function buscarFuncionarioPorRut(parts) {
  * @param {string} opts.basePath
  * @param {string} opts.usuarioLogin
  * @param {string} [opts.importacionId]
- * @param {number} [opts.limiteCarpetas] 0 = sin límite
+ * @param {number} [opts.limiteCarpetas] 0 = sin límite (desde offset)
+ * @param {number} [opts.offsetCarpetas] 0 = desde la primera carpeta (orden alfabético)
  * @param {boolean} [opts.dryRun]
  * @param {(partial: object) => Promise<void>} [opts.onProgress]
  */
@@ -84,15 +85,19 @@ async function importarCarpetasDesdeDisco(opts) {
   const basePath = validarRutaBase(resolveBasePath(opts.basePath));
   const inicio = Date.now();
   const usuarioLogin = opts.usuarioLogin || 'sistema';
-  const limite = Number(opts.limiteCarpetas) || 0;
+  const limite = Math.max(0, Number(opts.limiteCarpetas) || 0);
+  const offset = Math.max(0, Number(opts.offsetCarpetas) || 0);
   const dryRun = !!opts.dryRun;
   const onProgress = opts.onProgress || (async () => {});
 
   const resumen = {
     base_path: basePath,
     dry_run: dryRun,
+    offset_carpetas: offset,
+    limite_carpetas: limite,
     carpetas_procesadas: 0,
     carpetas_total: 0,
+    carpetas_en_tramo: 0,
     funcionarios_identificados: 0,
     funcionarios_no_encontrados: 0,
     rut_invalidos: 0,
@@ -100,18 +105,21 @@ async function importarCarpetasDesdeDisco(opts) {
     documentos_cargados: 0,
     documentos_rechazados: 0,
     documentos_sin_clasificar: 0,
-    asignacion_automatica: 0,
     incidencias: [],
     tiempo_ms: 0,
   };
 
-  const nombres = listarCarpetasRut(basePath);
+  const nombres = listarCarpetasRut(basePath).sort((a, b) =>
+    a.localeCompare(b, 'es', { numeric: true, sensitivity: 'base' })
+  );
   resumen.carpetas_total = nombres.length;
-  const aProcesar = limite > 0 ? nombres.slice(0, limite) : nombres;
+  const aProcesar = limite > 0 ? nombres.slice(offset, offset + limite) : nombres.slice(offset);
+  resumen.carpetas_en_tramo = aProcesar.length;
 
   for (let i = 0; i < aProcesar.length; i++) {
     const nombreCarpeta = aProcesar[i];
     resumen.carpetas_procesadas++;
+    const indiceGlobal = offset + i + 1;
 
     const parts = normalizeRutParts(nombreCarpeta);
     if (!parts) {
@@ -121,7 +129,12 @@ async function importarCarpetasDesdeDisco(opts) {
         tipo: 'rut_invalido',
         mensaje: 'Nombre de carpeta no es un RUT válido',
       });
-      await onProgress({ ...resumen, carpeta_actual: nombreCarpeta, indice: i + 1 });
+      await onProgress({
+        ...resumen,
+        carpeta_actual: nombreCarpeta,
+        indice: indiceGlobal,
+        indice_tramo: i + 1,
+      });
       continue;
     }
 
@@ -134,7 +147,12 @@ async function importarCarpetasDesdeDisco(opts) {
         tipo: 'rut_duplicado',
         mensaje: `Hay ${cantidad} funcionarios con el mismo número base`,
       });
-      await onProgress({ ...resumen, carpeta_actual: nombreCarpeta, indice: i + 1 });
+      await onProgress({
+        ...resumen,
+        carpeta_actual: nombreCarpeta,
+        indice: indiceGlobal,
+        indice_tramo: i + 1,
+      });
       continue;
     }
 
@@ -146,7 +164,12 @@ async function importarCarpetasDesdeDisco(opts) {
         tipo: 'funcionario_no_encontrado',
         mensaje: 'Importá primero el Excel de funcionarios o creá el registro manualmente',
       });
-      await onProgress({ ...resumen, carpeta_actual: nombreCarpeta, indice: i + 1 });
+      await onProgress({
+        ...resumen,
+        carpeta_actual: nombreCarpeta,
+        indice: indiceGlobal,
+        indice_tramo: i + 1,
+      });
       continue;
     }
 
@@ -161,7 +184,12 @@ async function importarCarpetasDesdeDisco(opts) {
         tipo: 'carpeta_vacia',
         mensaje: 'Sin archivos PDF',
       });
-      await onProgress({ ...resumen, carpeta_actual: nombreCarpeta, indice: i + 1 });
+      await onProgress({
+        ...resumen,
+        carpeta_actual: nombreCarpeta,
+        indice: indiceGlobal,
+        indice_tramo: i + 1,
+      });
       continue;
     }
 
@@ -169,24 +197,10 @@ async function importarCarpetasDesdeDisco(opts) {
       const fullPath = path.join(carpetaPath, pdfName);
       try {
         const buffer = fs.readFileSync(fullPath);
-        const { tipo, automatico } = await resolverTipoDocumentalImport(funcionario.id, pdfName);
-
-        if (!tipo) {
-          resumen.documentos_sin_clasificar++;
-          resumen.documentos_rechazados++;
-          resumen.incidencias.push({
-            carpeta: nombreCarpeta,
-            archivo: pdfName,
-            rut: formatearRut(parts.rut_normalizado),
-            tipo: 'sin_cupo_documental',
-            mensaje: 'Todos los tipos documentales ya tienen archivo activo',
-          });
-          continue;
-        }
+        const { tipo } = await resolverTipoDocumentalImport();
 
         if (dryRun) {
           resumen.documentos_cargados++;
-          if (automatico) resumen.asignacion_automatica++;
           continue;
         }
 
@@ -196,10 +210,9 @@ async function importarCarpetasDesdeDisco(opts) {
           buffer,
           originalname: pdfName,
           cargado_por: usuarioLogin,
-          asignacion_automatica: automatico,
+          origen_carga: 'importacion_masiva',
         });
         resumen.documentos_cargados++;
-        if (automatico) resumen.asignacion_automatica++;
       } catch (e) {
         resumen.documentos_rechazados++;
         resumen.incidencias.push({
@@ -218,10 +231,16 @@ async function importarCarpetasDesdeDisco(opts) {
     }
 
     if ((i + 1) % 5 === 0 || i === aProcesar.length - 1) {
-      await onProgress({ ...resumen, carpeta_actual: nombreCarpeta, indice: i + 1 });
+      await onProgress({
+        ...resumen,
+        carpeta_actual: nombreCarpeta,
+        indice: indiceGlobal,
+        indice_tramo: i + 1,
+      });
     }
   }
 
+  resumen.siguiente_offset = offset + aProcesar.length;
   resumen.tiempo_ms = Date.now() - inicio;
   resumen.incidencias_muestra = resumen.incidencias.slice(0, 100);
   return resumen;

@@ -3,7 +3,11 @@ const db = require('../db');
 const auth = require('../middleware/auth');
 const { normalizeRutParts, formatearRut, rutMatchesQuery } = require('../lib/rutChileno');
 const { normalizeTipoFuncionario } = require('../lib/personalFuncionarioTipo');
-const { PERSONAL_DOC_TIPOS } = require('../lib/personalDocTypes');
+const {
+  PERSONAL_DOC_TIPOS,
+  isTipoObligatorio,
+  tiposObligatoriosParaFuncionario,
+} = require('../lib/personalDocTypes');
 const { requireAccesoPersonal, requireGestionPersonal } = require('../lib/personalPermisos');
 const { registrarAuditoriaPersonal } = require('../lib/personalAuditoria');
 
@@ -29,24 +33,32 @@ function publicFuncionario(row, docsResumen) {
   };
 }
 
-async function docsResumenForFuncionario(funcionarioId) {
+async function docsResumenForFuncionario(funcionarioId, tipoFuncionario) {
   const activos = await db.query(
     `SELECT tipo_documental, estado, fecha_vencimiento
      FROM personal_documentos
      WHERE funcionario_id = $1 AND es_activo = TRUE`,
     [funcionarioId]
   );
-  const presentes = new Set(activos.rows.map((r) => r.tipo_documental));
-  const obligatorios = PERSONAL_DOC_TIPOS.map((t) => t.key);
+  const obligatoriosMeta = tiposObligatoriosParaFuncionario(tipoFuncionario);
+  const obligatorios = obligatoriosMeta.map((t) => t.key);
+  const obligatoriosActivos = activos.rows.filter(
+    (r) => isTipoObligatorio(r.tipo_documental) && obligatorios.includes(r.tipo_documental)
+  );
+  const presentes = new Set(obligatoriosActivos.map((r) => r.tipo_documental));
   const faltantes = obligatorios.filter((k) => !presentes.has(k));
-  const vencidos = activos.rows.filter((r) => r.estado === 'vencido').length;
-  const proximos = activos.rows.filter((r) => r.estado === 'proximo_vencer').length;
+  const vencidos = obligatoriosActivos.filter((r) => r.estado === 'vencido').length;
+  const proximos = obligatoriosActivos.filter((r) => r.estado === 'proximo_vencer').length;
+  const consolidados = activos.rows.filter((r) => r.tipo_documental === 'consolidado_antiguo').length;
+  const anexos = activos.rows.filter((r) => r.tipo_documental === 'anexo').length;
   return {
     total_obligatorios: obligatorios.length,
     cargados: presentes.size,
     faltantes,
     vencidos,
     proximos_vencer: proximos,
+    consolidados_antiguos: consolidados,
+    anexos,
   };
 }
 
@@ -130,7 +142,7 @@ router.get('/funcionarios/:id', auth, async (req, res) => {
       `SELECT * FROM personal_documentos WHERE funcionario_id = $1 ORDER BY tipo_documental, version_num DESC`,
       [req.params.id]
     );
-    const resumen = await docsResumenForFuncionario(req.params.id);
+    const resumen = await docsResumenForFuncionario(req.params.id, result.rows[0].tipo_funcionario);
     res.json({
       funcionario: publicFuncionario(result.rows[0], resumen),
       documentos: docs.rows,

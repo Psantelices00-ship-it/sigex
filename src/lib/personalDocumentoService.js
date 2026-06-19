@@ -3,17 +3,17 @@ const db = require('../db');
 const { validatePersonalPdf } = require('./personalPdfValidate');
 const {
   isTipoDocumentalValido,
+  permiteMultiplesActivos,
   cloudinaryFolder,
   cloudinaryFilename,
   calcularEstadoDocumento,
-  inferirTipoDocumentalDesdeNombre,
-  PERSONAL_DOC_TIPOS,
+  PERSONAL_DOC_TIPOS_IMPORTACION,
 } = require('./personalDocTypes');
 
-const ORDEN_TIPOS_IMPORT = PERSONAL_DOC_TIPOS.map((t) => t.key);
+const TIPO_CONSOLIDADO_IMPORT = PERSONAL_DOC_TIPOS_IMPORTACION[0].key;
 
 /**
- * Guarda un PDF en la carpeta del funcionario (reemplaza versión activa del mismo tipo).
+ * Guarda un PDF en la carpeta del funcionario.
  * @param {object} opts
  * @param {object} opts.funcionario fila personal_funcionarios
  * @param {string} opts.tipo_documental
@@ -21,7 +21,7 @@ const ORDEN_TIPOS_IMPORT = PERSONAL_DOC_TIPOS.map((t) => t.key);
  * @param {string} opts.originalname
  * @param {string} opts.cargado_por
  * @param {string|null} [opts.fecha_vencimiento]
- * @param {boolean} [opts.asignacion_automatica]
+ * @param {'manual'|'importacion_masiva'} [opts.origen_carga]
  */
 async function guardarDocumentoPersonal({
   funcionario,
@@ -30,7 +30,7 @@ async function guardarDocumentoPersonal({
   originalname,
   cargado_por,
   fecha_vencimiento = null,
-  asignacion_automatica = false,
+  origen_carga = 'manual',
 }) {
   if (!isTipoDocumentalValido(tipo_documental)) {
     throw new Error('Tipo documental inválido');
@@ -47,12 +47,16 @@ async function guardarDocumentoPersonal({
     originalname,
   });
 
-  const prev = await db.query(
-    `SELECT id FROM personal_documentos WHERE funcionario_id = $1 AND tipo_documental = $2 AND es_activo = TRUE`,
-    [funcionario.id, tipo_documental]
-  );
-  if (prev.rows.length) {
-    await db.query(`UPDATE personal_documentos SET es_activo = FALSE WHERE id = $1`, [prev.rows[0].id]);
+  let reemplazo = false;
+  if (!permiteMultiplesActivos(tipo_documental)) {
+    const prev = await db.query(
+      `SELECT id FROM personal_documentos WHERE funcionario_id = $1 AND tipo_documental = $2 AND es_activo = TRUE`,
+      [funcionario.id, tipo_documental]
+    );
+    if (prev.rows.length) {
+      reemplazo = true;
+      await db.query(`UPDATE personal_documentos SET es_activo = FALSE WHERE id = $1`, [prev.rows[0].id]);
+    }
   }
 
   const verRow = await db.query(
@@ -61,18 +65,19 @@ async function guardarDocumentoPersonal({
   );
   const versionNum = (verRow.rows[0]?.mx || 0) + 1;
   const estado = fecha_vencimiento ? calcularEstadoDocumento(fecha_vencimiento) : 'vigente';
+  const nombreArchivo = String(originalname || fname).trim() || fname;
 
   const result = await db.query(
     `INSERT INTO personal_documentos
       (funcionario_id, tipo_documental, version_num, es_activo, nombre_archivo, file_path, file_size,
-       mime_type, cloudinary_public_id, fecha_vencimiento, estado, cargado_por)
-     VALUES ($1,$2,$3,TRUE,$4,$5,$6,$7,$8,$9,$10,$11)
+       mime_type, cloudinary_public_id, fecha_vencimiento, estado, cargado_por, origen_carga)
+     VALUES ($1,$2,$3,TRUE,$4,$5,$6,$7,$8,$9,$10,$11,$12)
      RETURNING *`,
     [
       funcionario.id,
       tipo_documental,
       versionNum,
-      fname,
+      nombreArchivo,
       uploaded.secure_url,
       buffer.length,
       'application/pdf',
@@ -80,43 +85,23 @@ async function guardarDocumentoPersonal({
       fecha_vencimiento,
       estado,
       cargado_por,
+      origen_carga,
     ]
   );
 
   return {
     documento: result.rows[0],
-    reemplazo: prev.rows.length > 0,
-    asignacion_automatica,
+    reemplazo,
   };
 }
 
-/** Tipos obligatorios aún sin documento activo. */
-async function tiposDisponiblesParaFuncionario(funcionarioId) {
-  const activos = await db.query(
-    `SELECT tipo_documental FROM personal_documentos WHERE funcionario_id = $1 AND es_activo = TRUE`,
-    [funcionarioId]
-  );
-  const usados = new Set(activos.rows.map((r) => r.tipo_documental));
-  return ORDEN_TIPOS_IMPORT.filter((k) => !usados.has(k));
-}
-
-/**
- * Resuelve tipo documental: nombre de archivo o siguiente slot vacío.
- * @returns {{ tipo: string|null, automatico: boolean }}
- */
-async function resolverTipoDocumentalImport(funcionarioId, filename) {
-  const inferido = inferirTipoDocumentalDesdeNombre(filename);
-  if (inferido) return { tipo: inferido, automatico: false };
-
-  const disponibles = await tiposDisponiblesParaFuncionario(funcionarioId);
-  if (disponibles.length) return { tipo: disponibles[0], automatico: true };
-
-  return { tipo: null, automatico: false };
+/** Importación masiva: todos los PDF van al consolidado antiguo, sin ocupar slots obligatorios. */
+async function resolverTipoDocumentalImport() {
+  return { tipo: TIPO_CONSOLIDADO_IMPORT };
 }
 
 module.exports = {
   guardarDocumentoPersonal,
-  tiposDisponiblesParaFuncionario,
   resolverTipoDocumentalImport,
-  ORDEN_TIPOS_IMPORT,
+  TIPO_CONSOLIDADO_IMPORT,
 };

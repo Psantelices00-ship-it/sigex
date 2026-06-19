@@ -1,6 +1,6 @@
-/** Tipos documentales obligatorios de la carpeta funcionaria (solo PDF). */
+/** Tipos documentales obligatorios de la carpeta funcionaria (solo PDF, carga manual). */
 
-const PERSONAL_DOC_TIPOS = [
+const PERSONAL_DOC_TIPOS_OBLIGATORIOS = [
   { key: 'curriculum', label: 'Currículum Vitae', requiere_vencimiento: false, solo_hombres: false },
   { key: 'certificado_estudios', label: 'Certificado de estudios y/o título profesional', requiere_vencimiento: false, solo_hombres: false },
   { key: 'certificado_antecedentes', label: 'Certificado de antecedentes', requiere_vencimiento: true, solo_hombres: false },
@@ -11,38 +11,85 @@ const PERSONAL_DOC_TIPOS = [
   { key: 'certificado_afp', label: 'Certificado de incorporación a AFP', requiere_vencimiento: false, solo_hombres: false },
   { key: 'certificado_prevision', label: 'Certificado de Isapre o Fonasa', requiere_vencimiento: false, solo_hombres: false },
   { key: 'certificado_situacion_militar', label: 'Certificado de situación militar', requiere_vencimiento: false, solo_hombres: true },
+  { key: 'resolucion_nombramiento', label: 'Resolución de nombramiento', requiere_vencimiento: false, solo_hombres: false },
+  { key: 'contrato', label: 'Contrato', requiere_vencimiento: false, solo_hombres: false, solo_asistentes: true },
+];
+
+/** Anexos: carga manual, varios activos por funcionario. */
+const PERSONAL_DOC_TIPOS_ANEXOS = [
+  {
+    key: 'anexo',
+    label: 'Anexo',
+    requiere_vencimiento: false,
+    solo_hombres: false,
+    multiples_activos: true,
+  },
+];
+
+/** PDFs digitalizados en bloque (TOSHIBA); no reemplazan la carpeta documental vigente. */
+const PERSONAL_DOC_TIPOS_IMPORTACION = [
+  {
+    key: 'consolidado_antiguo',
+    label: 'Consolidado antiguo (importación masiva)',
+    requiere_vencimiento: false,
+    solo_hombres: false,
+    multiples_activos: true,
+  },
+];
+
+const PERSONAL_DOC_TIPOS = [
+  ...PERSONAL_DOC_TIPOS_OBLIGATORIOS,
+  ...PERSONAL_DOC_TIPOS_ANEXOS,
+  ...PERSONAL_DOC_TIPOS_IMPORTACION,
 ];
 
 const KEYS = new Set(PERSONAL_DOC_TIPOS.map((t) => t.key));
+const OBLIGATORIOS = new Set(PERSONAL_DOC_TIPOS_OBLIGATORIOS.map((t) => t.key));
+const MULTIPLES_ACTIVOS = new Set(
+  PERSONAL_DOC_TIPOS.filter((t) => t.multiples_activos).map((t) => t.key)
+);
 
 function isTipoDocumentalValido(key) {
   return KEYS.has(String(key || '').trim());
+}
+
+function isTipoObligatorio(key) {
+  return OBLIGATORIOS.has(String(key || '').trim());
+}
+
+function isTipoAnexo(key) {
+  return String(key || '').trim() === 'anexo';
+}
+
+function isTipoCargaManual(key) {
+  return isTipoObligatorio(key) || isTipoAnexo(key);
+}
+
+function permiteMultiplesActivos(key) {
+  return MULTIPLES_ACTIVOS.has(String(key || '').trim());
 }
 
 function tipoDocumentalLabel(key) {
   return PERSONAL_DOC_TIPOS.find((t) => t.key === key)?.label || key;
 }
 
-/** Reglas heurísticas para importación masiva por nombre de archivo. */
-const FILENAME_RULES = [
-  { tipo: 'curriculum', patterns: [/curriculum/i, /curricul/i, /\bcv\b/i] },
-  { tipo: 'certificado_estudios', patterns: [/titulo/i, /t[ií]tulo/i, /estudios/i, /profesional/i] },
-  { tipo: 'certificado_antecedentes', patterns: [/antecedentes/i] },
-  { tipo: 'certificado_nacimiento', patterns: [/nacimiento/i] },
-  { tipo: 'certificado_inhabilidad_menores', patterns: [/inhabilidad/i, /menores/i] },
-  { tipo: 'cedula_identidad', patterns: [/cedula/i, /c[eé]dula/i, /identidad/i] },
-  { tipo: 'certificado_salud', patterns: [/salud/i, /medico/i, /m[eé]dico/i] },
-  { tipo: 'certificado_afp', patterns: [/\bafp\b/i] },
-  { tipo: 'certificado_prevision', patterns: [/isapre/i, /fonasa/i, /prevision/i, /previsi[oó]n/i] },
-  { tipo: 'certificado_situacion_militar', patterns: [/militar/i, /situacion.?militar/i] },
-];
+function tiposObligatoriosParaFuncionario(tipoFuncionario) {
+  const tipo = tipoFuncionario === 'docente' ? 'docente' : 'asistente';
+  return PERSONAL_DOC_TIPOS_OBLIGATORIOS.filter((t) => {
+    if (t.solo_asistentes && tipo !== 'asistente') return false;
+    if (t.solo_docentes && tipo !== 'docente') return false;
+    return true;
+  });
+}
 
-function inferirTipoDocumentalDesdeNombre(filename) {
-  const base = String(filename || '').toLowerCase();
-  for (const rule of FILENAME_RULES) {
-    if (rule.patterns.some((re) => re.test(base))) return rule.tipo;
-  }
-  return null;
+function tipoPermitidoParaFuncionario(tipoKey, tipoFuncionario) {
+  if (!isTipoCargaManual(tipoKey)) return false;
+  const meta = PERSONAL_DOC_TIPOS.find((t) => t.key === tipoKey);
+  if (!meta) return false;
+  const tipo = tipoFuncionario === 'docente' ? 'docente' : 'asistente';
+  if (meta.solo_asistentes && tipo !== 'asistente') return false;
+  if (meta.solo_docentes && tipo !== 'docente') return false;
+  return true;
 }
 
 function cloudinaryFolder(tipoFuncionario, rutNormalizado, tipoDocumental) {
@@ -69,9 +116,17 @@ function calcularEstadoDocumento(fechaVencimiento, diasAlerta = 30) {
 
 module.exports = {
   PERSONAL_DOC_TIPOS,
+  PERSONAL_DOC_TIPOS_OBLIGATORIOS,
+  PERSONAL_DOC_TIPOS_ANEXOS,
+  PERSONAL_DOC_TIPOS_IMPORTACION,
   isTipoDocumentalValido,
+  isTipoObligatorio,
+  isTipoAnexo,
+  isTipoCargaManual,
+  permiteMultiplesActivos,
   tipoDocumentalLabel,
-  inferirTipoDocumentalDesdeNombre,
+  tiposObligatoriosParaFuncionario,
+  tipoPermitidoParaFuncionario,
   cloudinaryFolder,
   cloudinaryFilename,
   calcularEstadoDocumento,

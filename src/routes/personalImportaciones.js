@@ -155,6 +155,7 @@ router.post('/importaciones/carpetas-pdf', auth, async (req, res) => {
 
     const body = req.body || {};
     const limiteCarpetas = Number(body.limite_carpetas) || 0;
+    const offsetCarpetas = Math.max(0, Number(body.offset_carpetas) || 0);
     const dryRun = body.dry_run === true || body.dry_run === 'true';
     const basePath = body.base_path || DEFAULT_BASE;
 
@@ -163,7 +164,13 @@ router.post('/importaciones/carpetas-pdf', auth, async (req, res) => {
        VALUES ('carpetas_pdf', 'procesando', $1, $2) RETURNING id`,
       [
         req.user.login,
-        JSON.stringify({ base_path: basePath, limite_carpetas: limiteCarpetas, dry_run: dryRun, progreso: 0 }),
+        JSON.stringify({
+          base_path: basePath,
+          limite_carpetas: limiteCarpetas,
+          offset_carpetas: offsetCarpetas,
+          dry_run: dryRun,
+          progreso: 0,
+        }),
       ]
     );
     const importId = imp.rows[0].id;
@@ -184,6 +191,7 @@ router.post('/importaciones/carpetas-pdf', auth, async (req, res) => {
           usuarioLogin: req.user.login,
           importacionId: importId,
           limiteCarpetas,
+          offsetCarpetas,
           dryRun,
           onProgress: async (partial) => {
             await db.query(`UPDATE personal_importaciones SET resumen_json = $2 WHERE id = $1`, [

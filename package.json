@@ -25,7 +25,8 @@
     "db:produccion:reset": "node scripts/produccion-reset.js",
     "db:produccion:admin": "node scripts/crear-admin-produccion.js",
     "db:sql": "node scripts/run-sql-file.js",
-    "personal:import-carpetas": "node scripts/importar-carpetas-personal.js"
+    "personal:import-carpetas": "node scripts/importar-carpetas-personal.js",
+    "personal:import-excel": "node scripts/importar-funcionarios-excel.js"
   },
   "dependencies": {
     "axios": "^1.16.0",

@@ -7,6 +7,9 @@ const { streamRemoteFileToResponse } = require('../streamRemoteFile');
 const { validatePersonalPdf, personalDocMaxBytes } = require('../lib/personalPdfValidate');
 const {
   isTipoDocumentalValido,
+  isTipoCargaManual,
+  tipoPermitidoParaFuncionario,
+  permiteMultiplesActivos,
   tipoDocumentalLabel,
   cloudinaryFolder,
   cloudinaryFilename,
@@ -97,6 +100,14 @@ router.post('/funcionarios/:funcionarioId/documentos', auth, upload.single('arch
     if (!isTipoDocumentalValido(tipo)) {
       return res.status(400).json({ error: 'Tipo documental inválido' });
     }
+    if (!isTipoCargaManual(tipo)) {
+      return res.status(400).json({
+        error: 'Este tipo solo se carga por importación masiva. Use la carpeta documental vigente o anexos.',
+      });
+    }
+    if (!tipoPermitidoParaFuncionario(tipo, funcionario.tipo_funcionario)) {
+      return res.status(400).json({ error: 'Este tipo documental no aplica a este funcionario' });
+    }
     if (!req.file?.buffer) return res.status(400).json({ error: 'Debe adjuntar un archivo PDF' });
 
     const pdfErr = validatePersonalPdf(req.file.buffer, req.file.originalname, req.file.mimetype);
@@ -112,11 +123,13 @@ router.post('/funcionarios/:funcionarioId/documentos', auth, upload.single('arch
       originalname: req.file.originalname,
     });
 
-    const prev = await db.query(
-      `SELECT id, version_num FROM personal_documentos
+    const prev = permiteMultiplesActivos(tipo)
+      ? { rows: [] }
+      : await db.query(
+          `SELECT id, version_num FROM personal_documentos
        WHERE funcionario_id = $1 AND tipo_documental = $2 AND es_activo = TRUE`,
-      [funcionario.id, tipo]
-    );
+          [funcionario.id, tipo]
+        );
 
     if (prev.rows.length) {
       await db.query(
@@ -136,14 +149,14 @@ router.post('/funcionarios/:funcionarioId/documentos', auth, upload.single('arch
     const result = await db.query(
       `INSERT INTO personal_documentos
         (funcionario_id, tipo_documental, version_num, es_activo, nombre_archivo, file_path, file_size,
-         mime_type, cloudinary_public_id, fecha_vencimiento, estado, cargado_por)
-       VALUES ($1,$2,$3,TRUE,$4,$5,$6,$7,$8,$9,$10,$11)
+         mime_type, cloudinary_public_id, fecha_vencimiento, estado, cargado_por, origen_carga)
+       VALUES ($1,$2,$3,TRUE,$4,$5,$6,$7,$8,$9,$10,$11,'manual')
        RETURNING *`,
       [
         funcionario.id,
         tipo,
         versionNum,
-        fname,
+        req.file.originalname || fname,
         uploaded.secure_url,
         req.file.size,
         'application/pdf',
