@@ -133,26 +133,84 @@ function parseRangoConsulta(query) {
   };
 }
 
-async function consultaLiquidacionesPorRut(rut, rango) {
-  const r = await db.query(
-    `SELECT r.id, r.pagina, r.rut_display, r.apellido_paterno, r.apellido_materno, r.nombres,
-            r.nombre_completo, r.cargo, r.establecimiento, r.funcionario_id,
-            p.id AS periodo_id, p.mes, p.anio, p.etiqueta, p.establecimiento AS periodo_establecimiento
-     FROM personal_liquidaciones_registros r
-     JOIN personal_liquidaciones_periodos p ON p.id = r.periodo_id
-     WHERE r.rut_normalizado = $1
-       AND p.estado = 'completo'
-       AND (p.anio * 100 + p.mes) BETWEEN $2 AND $3
-     ORDER BY p.anio, p.mes, r.pagina`,
-    [rut, rango.desdeKey, rango.hastaKey]
-  );
+const ULTIMAS_LIQUIDACIONES_PERMITIDAS = new Set([3, 6, 12, 24]);
+
+function parseUltimasLiquidaciones(query) {
+  const n = parseIntSafe(query?.ultimas);
+  if (!n || !ULTIMAS_LIQUIDACIONES_PERMITIDAS.has(n)) return null;
+  return n;
+}
+
+async function consultaLiquidacionesPorRut(rut, rango, ultimas) {
+  let rows;
+  if (ultimas) {
+    const r = await db.query(
+      `SELECT r.id, r.pagina, r.rut_display, r.apellido_paterno, r.apellido_materno, r.nombres,
+              r.nombre_completo, r.cargo, r.establecimiento, r.funcionario_id,
+              p.id AS periodo_id, p.mes, p.anio, p.etiqueta, p.establecimiento AS periodo_establecimiento
+       FROM personal_liquidaciones_registros r
+       JOIN personal_liquidaciones_periodos p ON p.id = r.periodo_id
+       WHERE r.rut_normalizado = $1
+         AND p.estado = 'completo'
+       ORDER BY p.anio DESC, p.mes DESC, r.pagina
+       LIMIT $2`,
+      [rut, ultimas]
+    );
+    rows = [...r.rows].reverse();
+  } else {
+    const r = await db.query(
+      `SELECT r.id, r.pagina, r.rut_display, r.apellido_paterno, r.apellido_materno, r.nombres,
+              r.nombre_completo, r.cargo, r.establecimiento, r.funcionario_id,
+              p.id AS periodo_id, p.mes, p.anio, p.etiqueta, p.establecimiento AS periodo_establecimiento
+       FROM personal_liquidaciones_registros r
+       JOIN personal_liquidaciones_periodos p ON p.id = r.periodo_id
+       WHERE r.rut_normalizado = $1
+         AND p.estado = 'completo'
+         AND (p.anio * 100 + p.mes) BETWEEN $2 AND $3
+       ORDER BY p.anio, p.mes, r.pagina`,
+      [rut, rango.desdeKey, rango.hastaKey]
+    );
+    rows = r.rows;
+  }
 
   const funcionario = await db.query(
     'SELECT id, rut_normalizado, nombre_completo, tipo_funcionario, planta FROM personal_funcionarios WHERE rut_normalizado = $1',
     [rut]
   );
 
-  return { rows: r.rows, funcionario: funcionario.rows[0] || null };
+  return { rows, funcionario: funcionario.rows[0] || null };
+}
+
+async function liquidacionesParaExportar(rut, rango, ultimas) {
+  if (ultimas) {
+    const r = await db.query(
+      `SELECT r.pagina, r.nombre_completo, r.rut_display,
+              p.file_path, p.mes, p.anio, p.etiqueta
+       FROM personal_liquidaciones_registros r
+       JOIN personal_liquidaciones_periodos p ON p.id = r.periodo_id
+       WHERE r.rut_normalizado = $1
+         AND p.estado = 'completo'
+         AND p.file_path IS NOT NULL AND trim(p.file_path) <> ''
+       ORDER BY p.anio DESC, p.mes DESC, r.pagina
+       LIMIT $2`,
+      [rut, ultimas]
+    );
+    return [...r.rows].reverse();
+  }
+
+  const r = await db.query(
+    `SELECT r.pagina, r.nombre_completo, r.rut_display,
+            p.file_path, p.mes, p.anio, p.etiqueta
+     FROM personal_liquidaciones_registros r
+     JOIN personal_liquidaciones_periodos p ON p.id = r.periodo_id
+     WHERE r.rut_normalizado = $1
+       AND p.estado = 'completo'
+       AND p.file_path IS NOT NULL AND trim(p.file_path) <> ''
+       AND (p.anio * 100 + p.mes) BETWEEN $2 AND $3
+     ORDER BY p.anio, p.mes, r.pagina`,
+    [rut, rango.desdeKey, rango.hastaKey]
+  );
+  return r.rows;
 }
 
 /** GET /liquidaciones/periodos */
@@ -281,9 +339,11 @@ router.get('/liquidaciones/consulta', auth, async (req, res) => {
     }
 
     const rango = parseRangoConsulta(req.query);
+    const ultimas = parseUltimasLiquidaciones(req.query);
     const rangoJson = {
       desde: { mes: rango.desdeMes, anio: rango.desdeAnio },
       hasta: { mes: rango.hastaMes, anio: rango.hastaAnio },
+      ultimas,
     };
 
     let rut = rutDirecto;
@@ -312,7 +372,7 @@ router.get('/liquidaciones/consulta', auth, async (req, res) => {
       rut = coincidencias[0].rut_normalizado;
     }
 
-    const { rows, funcionario } = await consultaLiquidacionesPorRut(rut, rango);
+    const { rows, funcionario } = await consultaLiquidacionesPorRut(rut, rango, ultimas);
 
     res.json({
       multiple: false,
@@ -340,47 +400,42 @@ router.post('/liquidaciones/exportar', auth, async (req, res) => {
     const rut = resolveRutInput(req.body?.rut);
     if (!rut) return res.status(400).json({ error: 'Indicá un RUT válido' });
 
-    const desdeMes = parseIntSafe(req.body?.desde_mes, 1);
-    const desdeAnio = parseIntSafe(req.body?.desde_anio, 2000);
-    const hastaMes = parseIntSafe(req.body?.hasta_mes, 12);
-    const hastaAnio = parseIntSafe(req.body?.hasta_anio, new Date().getFullYear());
-    const desdeKey = desdeAnio * 100 + desdeMes;
-    const hastaKey = hastaAnio * 100 + hastaMes;
+    const rango = parseRangoConsulta(req.body);
+    const ultimas = parseUltimasLiquidaciones(req.body);
 
-    const r = await db.query(
-      `SELECT r.pagina, r.nombre_completo, r.rut_display,
-              p.file_path, p.mes, p.anio, p.etiqueta
-       FROM personal_liquidaciones_registros r
-       JOIN personal_liquidaciones_periodos p ON p.id = r.periodo_id
-       WHERE r.rut_normalizado = $1
-         AND p.estado = 'completo'
-         AND p.file_path IS NOT NULL AND trim(p.file_path) <> ''
-         AND (p.anio * 100 + p.mes) BETWEEN $2 AND $3
-       ORDER BY p.anio, p.mes, r.pagina`,
-      [rut, Math.min(desdeKey, hastaKey), Math.max(desdeKey, hastaKey)]
-    );
+    const exportRows = await liquidacionesParaExportar(rut, rango, ultimas);
 
-    if (!r.rows.length) {
+    if (!exportRows.length) {
       return res.status(404).json({ error: 'No hay liquidaciones para ese RUT en el período indicado' });
     }
 
-    const items = r.rows.map((row) => ({
+    const items = exportRows.map((row) => ({
       file_path: row.file_path,
       pagina: row.pagina,
       etiqueta: periodoLabel(row),
     }));
 
     const pdfBuffer = await buildLiquidacionesExportPdf(items);
-    const nombre = r.rows[0].nombre_completo || rut;
+    const nombre = exportRows[0].nombre_completo || rut;
     const safeName = String(nombre)
       .replace(/[/\\:*?"<>|]/g, '_')
       .slice(0, 80);
-    const fname = `liquidaciones_${safeName}_${desdeAnio}-${String(desdeMes).padStart(2, '0')}_${hastaAnio}-${String(hastaMes).padStart(2, '0')}.pdf`;
+    const fname = ultimas
+      ? `liquidaciones_${safeName}_ultimas_${ultimas}.pdf`
+      : `liquidaciones_${safeName}_${rango.desdeAnio}-${String(rango.desdeMes).padStart(2, '0')}_${rango.hastaAnio}-${String(rango.hastaMes).padStart(2, '0')}.pdf`;
 
     await registrarAuditoriaPersonal(req, {
       accion: 'liquidaciones_exportar',
       entidad: 'personal_liquidaciones_registros',
-      detalle_json: { rut, desde_mes: desdeMes, desde_anio: desdeAnio, hasta_mes: hastaMes, hasta_anio: hastaAnio, paginas: items.length },
+      detalle_json: {
+        rut,
+        desde_mes: rango.desdeMes,
+        desde_anio: rango.desdeAnio,
+        hasta_mes: rango.hastaMes,
+        hasta_anio: rango.hastaAnio,
+        ultimas,
+        paginas: items.length,
+      },
     });
 
     res.setHeader('Content-Type', 'application/pdf');

@@ -30,7 +30,7 @@ app.get('/', (req, res) =>
   res.json({
     sistema: 'SIGEX',
     version: '1.1.0',
-    build: '2026-07-02-personal-liquidaciones-nombre',
+    build: '2026-07-02-liquidaciones-ultimas-preset',
     estado: 'activo',
     modulos: [
       'auth',
