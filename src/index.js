@@ -30,7 +30,7 @@ app.get('/', (req, res) =>
   res.json({
     sistema: 'SIGEX',
     version: '1.1.0',
-    build: '2026-06-09-caja-chica-patch-gastos',
+    build: '2026-07-02-personal-liquidaciones-nombre',
     estado: 'activo',
     modulos: [
       'auth',
