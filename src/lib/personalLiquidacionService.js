@@ -1,9 +1,13 @@
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
+const os = require('os');
 const db = require('../db');
 const uploadToCloudinary = require('../cloudinary_upload');
 const { validatePersonalPdf } = require('./personalPdfValidate');
 const { parseLiquidacionesPdf, etiquetaPeriodo } = require('./personalLiquidacionParse');
+
+const CLOUDINARY_MAX_BYTES = 10 * 1024 * 1024;
 
 async function insertRegistrosBatch(periodoId, registros) {
   const ruts = [...new Set(registros.map((r) => r.rut_normalizado).filter(Boolean))];
@@ -51,9 +55,40 @@ async function insertRegistrosBatch(periodoId, registros) {
   }
 }
 
+function comprimirPdfParaCloudinary(buffer) {
+  const inPath = path.join(os.tmpdir(), `sigex-liq-in-${Date.now()}.pdf`);
+  const outPath = path.join(os.tmpdir(), `sigex-liq-out-${Date.now()}.pdf`);
+  try {
+    fs.writeFileSync(inPath, buffer);
+    execSync(
+      `gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/ebook -dNOPAUSE -dQUIET -dBATCH -sOutputFile="${outPath}" "${inPath}"`,
+      { stdio: 'pipe' }
+    );
+    const out = fs.readFileSync(outPath);
+    if (out.length > CLOUDINARY_MAX_BYTES) {
+      throw new Error(
+        `Tras comprimir sigue pesando ${(out.length / (1024 * 1024)).toFixed(2)} MB (máx. 10 MB en Cloudinary)`
+      );
+    }
+    return out;
+  } finally {
+    try {
+      fs.unlinkSync(inPath);
+    } catch {
+      /* ignore */
+    }
+    try {
+      fs.unlinkSync(outPath);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 /**
  * @param {object} opts
- * @param {Buffer} opts.buffer
+ * @param {Buffer} opts.buffer PDF a subir (o original si <=10 MB)
+ * @param {Buffer} [opts.parseBuffer] PDF para indexar (si difiere del subido)
  * @param {string} opts.originalname
  * @param {string} opts.usuarioLogin
  * @param {number} [opts.mes]
@@ -63,6 +98,7 @@ async function insertRegistrosBatch(periodoId, registros) {
  */
 async function cargarLiquidacionesPdf({
   buffer,
+  parseBuffer: parseBufferIn,
   originalname,
   usuarioLogin,
   mes: mesIn,
@@ -70,13 +106,21 @@ async function cargarLiquidacionesPdf({
   establecimiento: estIn,
   reemplazar = false,
 }) {
-  const pdfErr = validatePersonalPdf(buffer, originalname, 'application/pdf');
+  const parseBuffer = parseBufferIn || buffer;
+  const pdfErr = validatePersonalPdf(parseBuffer, originalname, 'application/pdf');
   if (pdfErr) throw new Error(pdfErr);
 
-  const parsed = await parseLiquidacionesPdf(buffer);
+  const parsed = await parseLiquidacionesPdf(parseBuffer);
   if (!parsed.registros.length) {
     throw new Error('No se detectaron liquidaciones en el PDF (formato DEIS).');
   }
+
+  let uploadBuffer = buffer;
+  if (uploadBuffer.length > CLOUDINARY_MAX_BYTES) {
+    uploadBuffer = comprimirPdfParaCloudinary(buffer);
+  }
+  const uploadErr = validatePersonalPdf(uploadBuffer, originalname, 'application/pdf');
+  if (uploadErr) throw new Error(uploadErr);
 
   const mes = Number(mesIn) || parsed.mes;
   const anio = Number(anioIn) || parsed.anio;
@@ -119,7 +163,7 @@ async function cargarLiquidacionesPdf({
 
     const folder = `personal/liquidaciones/${periodoId}`;
     const fname = `liquidaciones_${anio}_${String(mes).padStart(2, '0')}.pdf`;
-    const uploaded = await uploadToCloudinary(buffer, fname, folder, {
+    const uploaded = await uploadToCloudinary(uploadBuffer, fname, folder, {
       mimetype: 'application/pdf',
       originalname,
     });
