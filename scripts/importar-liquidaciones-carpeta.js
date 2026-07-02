@@ -72,7 +72,7 @@ async function main() {
       });
       ok++;
       console.log(
-        `OK ${result.etiqueta} · ${result.total_registros} registros · ${((Date.now() - t0) / 1000).toFixed(1)}s`
+        `OK ${result.periodo?.etiqueta || `${result.mes}/${result.anio}`} · ${result.total_registros} registros · ${((Date.now() - t0) / 1000).toFixed(1)}s`
       );
     } catch (e) {
       if (e.code === 'DUPLICATE_PERIODO') {

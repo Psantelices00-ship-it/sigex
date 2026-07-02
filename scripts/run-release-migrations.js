@@ -9,7 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const db = require('../src/db');
 
-const RELEASE_MIGRATIONS = ['022_personal_liquidaciones.sql'];
+const RELEASE_MIGRATIONS = [];
 
 async function main() {
   const dir = path.join(__dirname, '..', 'src', 'models', 'migrations');
