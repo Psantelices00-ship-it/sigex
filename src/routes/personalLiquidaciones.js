@@ -2,14 +2,13 @@ const router = require('express').Router();
 const multer = require('multer');
 const db = require('../db');
 const auth = require('../middleware/auth');
-const uploadToCloudinary = require('../cloudinary_upload');
 const { streamRemoteFileToResponse } = require('../streamRemoteFile');
-const { validatePersonalPdf } = require('../lib/personalPdfValidate');
 const { normalizeRutParts, formatearRut } = require('../lib/rutChileno');
 const { requireAccesoPersonal, requireGestionPersonal } = require('../lib/personalPermisos');
 const { registrarAuditoriaPersonal } = require('../lib/personalAuditoria');
-const { parseLiquidacionesPdf, etiquetaPeriodo } = require('../lib/personalLiquidacionParse');
+const { etiquetaPeriodo } = require('../lib/personalLiquidacionParse');
 const { buildLiquidacionesExportPdf, extractSinglePagePdf } = require('../lib/personalLiquidacionExport');
+const { cargarLiquidacionesPdf } = require('../lib/personalLiquidacionService');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -36,52 +35,6 @@ function resolveRutInput(input) {
   if (!raw) return null;
   const parts = normalizeRutParts(raw);
   return parts?.rut_normalizado || null;
-}
-
-async function insertRegistrosBatch(periodoId, registros) {
-  const ruts = [...new Set(registros.map((r) => r.rut_normalizado).filter(Boolean))];
-  const funcMap = new Map();
-  if (ruts.length) {
-    const fr = await db.query(
-      `SELECT id, rut_normalizado FROM personal_funcionarios WHERE rut_normalizado = ANY($1::text[])`,
-      [ruts]
-    );
-    for (const row of fr.rows) funcMap.set(row.rut_normalizado, row.id);
-  }
-
-  const CHUNK = 80;
-  for (let i = 0; i < registros.length; i += CHUNK) {
-    const slice = registros.slice(i, i + CHUNK);
-    const values = [];
-    const params = [];
-    let p = 1;
-    for (const reg of slice) {
-      const funcionarioId = funcMap.get(reg.rut_normalizado) || null;
-      values.push(
-        `($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++})`
-      );
-      params.push(
-        periodoId,
-        reg.pagina,
-        reg.rut_normalizado,
-        reg.rut_display,
-        reg.apellido_paterno,
-        reg.apellido_materno,
-        reg.nombres,
-        reg.nombre_completo,
-        reg.cargo,
-        reg.establecimiento,
-        funcionarioId
-      );
-    }
-    await db.query(
-      `INSERT INTO personal_liquidaciones_registros
-        (periodo_id, pagina, rut_normalizado, rut_display, apellido_paterno, apellido_materno,
-         nombres, nombre_completo, cargo, establecimiento, funcionario_id)
-       VALUES ${values.join(', ')}`,
-      params
-    );
-  }
 }
 
 /** GET /liquidaciones/periodos */
@@ -114,113 +67,47 @@ router.get('/liquidaciones/periodos/:id', auth, async (req, res) => {
 
 /** POST /liquidaciones/periodos — carga PDF mensual */
 router.post('/liquidaciones/periodos', auth, upload.single('archivo'), async (req, res) => {
-  let periodoId = null;
   try {
     if (!requireGestionPersonal(req, res)) return;
     if (!req.file?.buffer?.length) {
       return res.status(400).json({ error: 'Adjuntá el PDF mensual de liquidaciones' });
     }
 
-    const pdfErr = validatePersonalPdf(req.file.buffer, req.file.originalname, req.file.mimetype);
-    if (pdfErr) return res.status(400).json({ error: pdfErr });
-
-    const parsed = await parseLiquidacionesPdf(req.file.buffer);
-    if (!parsed.registros.length) {
-      return res.status(400).json({
-        error: 'No se detectaron liquidaciones en el PDF. Verificá que sea el formato estándar DEIS/MINEDUC.',
-      });
-    }
-
     const mesBody = parseIntSafe(req.body?.mes);
     const anioBody = parseIntSafe(req.body?.anio);
-    const mes = mesBody || parsed.mes;
-    const anio = anioBody || parsed.anio;
-    if (!mes || !anio) {
-      return res.status(400).json({ error: 'No se pudo detectar mes/año. Indicalos manualmente en el formulario.' });
-    }
+    const establecimientoBody = String(req.body?.establecimiento || '').trim() || undefined;
 
-    const establecimiento =
-      String(req.body?.establecimiento || parsed.establecimiento || '').trim() || null;
-    const etiqueta = String(req.body?.etiqueta || etiquetaPeriodo(mes, anio) || '').trim();
-
-    const dup = await db.query(
-      `SELECT id FROM personal_liquidaciones_periodos
-       WHERE mes = $1 AND anio = $2 AND COALESCE(establecimiento, '') = COALESCE($3, '')`,
-      [mes, anio, establecimiento]
-    );
-    if (dup.rows.length) {
-      return res.status(409).json({
-        error: `Ya existe una carga para ${etiqueta}${establecimiento ? ` (${establecimiento})` : ''}. Eliminá el período anterior antes de volver a cargar.`,
-        periodo_id: dup.rows[0].id,
-      });
-    }
-
-    const ins = await db.query(
-      `INSERT INTO personal_liquidaciones_periodos
-        (mes, anio, etiqueta, establecimiento, nombre_archivo, file_path, file_size,
-         total_paginas, total_registros, estado, cargado_por)
-       VALUES ($1,$2,$3,$4,$5,'', $6, $7, 0, 'procesando', $8)
-       RETURNING *`,
-      [
-        mes,
-        anio,
-        etiqueta,
-        establecimiento,
-        req.file.originalname,
-        req.file.size,
-        parsed.total_paginas,
-        req.user.login,
-      ]
-    );
-    periodoId = ins.rows[0].id;
-
-    const folder = `personal/liquidaciones/${periodoId}`;
-    const fname = `liquidaciones_${anio}_${String(mes).padStart(2, '0')}.pdf`;
-    const uploaded = await uploadToCloudinary(req.file.buffer, fname, folder, {
-      mimetype: 'application/pdf',
+    const result = await cargarLiquidacionesPdf({
+      buffer: req.file.buffer,
       originalname: req.file.originalname,
+      usuarioLogin: req.user.login,
+      mes: mesBody || undefined,
+      anio: anioBody || undefined,
+      establecimiento: establecimientoBody,
+      reemplazar: req.body?.reemplazar === '1' || req.body?.reemplazar === 'true',
     });
-
-    await db.query(
-      `UPDATE personal_liquidaciones_periodos
-       SET file_path = $1, cloudinary_public_id = $2
-       WHERE id = $3`,
-      [uploaded.secure_url, uploaded.public_id, periodoId]
-    );
-
-    await insertRegistrosBatch(periodoId, parsed.registros);
-
-    const upd = await db.query(
-      `UPDATE personal_liquidaciones_periodos
-       SET total_registros = $1, estado = 'completo', error_mensaje = NULL
-       WHERE id = $2
-       RETURNING *`,
-      [parsed.registros.length, periodoId]
-    );
 
     await registrarAuditoriaPersonal(req, {
       accion: 'liquidaciones_carga_mes',
       entidad: 'personal_liquidaciones_periodos',
-      entidad_id: periodoId,
+      entidad_id: result.periodo.id,
       detalle_json: {
-        mes,
-        anio,
-        establecimiento,
-        total_registros: parsed.registros.length,
+        mes: result.mes,
+        anio: result.anio,
+        establecimiento: result.establecimiento,
+        total_registros: result.total_registros,
         nombre_archivo: req.file.originalname,
       },
     });
 
-    res.status(201).json(upd.rows[0]);
+    res.status(201).json(result.periodo);
   } catch (err) {
     console.error('[personal/liquidaciones/carga]', err);
-    if (periodoId) {
-      await db
-        .query(
-          `UPDATE personal_liquidaciones_periodos SET estado = 'error', error_mensaje = $1 WHERE id = $2`,
-          [String(err.message || err).slice(0, 500), periodoId]
-        )
-        .catch(() => {});
+    if (err.code === 'DUPLICATE_PERIODO') {
+      return res.status(409).json({
+        error: `${err.message}. Eliminá el período anterior o marcá reemplazar.`,
+        periodo_id: err.periodo_id,
+      });
     }
     res.status(500).json({ error: err.message || 'Error al procesar liquidaciones' });
   }
