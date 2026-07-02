@@ -37,6 +37,124 @@ function resolveRutInput(input) {
   return parts?.rut_normalizado || null;
 }
 
+function resolveConsultaTermino(query) {
+  const raw = String(query?.rut ?? query?.nombre ?? query?.q ?? '').trim();
+  if (!raw) return { rut: null, termino: null };
+  const rut = resolveRutInput(raw);
+  if (rut) return { rut, termino: raw };
+  return { rut: null, termino: raw };
+}
+
+function nombreBusquedaTokens(input) {
+  const tokens = String(input || '')
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length >= 2);
+  if (tokens.length) return tokens;
+  const whole = String(input || '').trim().toLowerCase();
+  return whole.length >= 3 ? [whole] : [];
+}
+
+function sqlNombreTokens(haystackExpr, tokens, params) {
+  let clause = '';
+  for (const tok of tokens) {
+    params.push(`%${tok}%`);
+    clause += ` AND LOWER(${haystackExpr}) LIKE $${params.length}`;
+  }
+  return clause;
+}
+
+async function buscarCoincidenciasPorNombre(termino) {
+  const tokens = nombreBusquedaTokens(termino);
+  if (!tokens.length) return [];
+
+  const params = [];
+  const haystackLiq =
+    "COALESCE(r.nombre_completo, '') || ' ' || COALESCE(r.apellido_paterno, '') || ' ' || COALESCE(r.apellido_materno, '') || ' ' || COALESCE(r.nombres, '')";
+  const liqClause = sqlNombreTokens(haystackLiq, tokens, params);
+  const funcClause = sqlNombreTokens('COALESCE(f.nombre_completo, \'\')', tokens, params);
+
+  const r = await db.query(
+    `SELECT DISTINCT ON (sub.rut_normalizado)
+            sub.rut_normalizado,
+            sub.rut_display,
+            sub.nombre_completo,
+            sub.cargo,
+            sub.establecimiento
+     FROM (
+       SELECT r.rut_normalizado,
+              COALESCE(NULLIF(trim(r.rut_display), ''), r.rut_normalizado) AS rut_display,
+              r.nombre_completo,
+              r.cargo,
+              r.establecimiento,
+              0 AS prioridad
+       FROM personal_liquidaciones_registros r
+       WHERE 1=1${liqClause}
+       UNION ALL
+       SELECT f.rut_normalizado,
+              f.rut_numero || '-' || upper(f.rut_dv) AS rut_display,
+              f.nombre_completo,
+              COALESCE(f.planta, '') AS cargo,
+              COALESCE(f.ubicacion, '') AS establecimiento,
+              1 AS prioridad
+       FROM personal_funcionarios f
+       WHERE f.activo = TRUE${funcClause}
+     ) sub
+     ORDER BY sub.rut_normalizado, sub.prioridad, sub.nombre_completo
+     LIMIT 25`,
+    params
+  );
+
+  return r.rows.map((row) => ({
+    rut_normalizado: row.rut_normalizado,
+    rut: formatearRut(row.rut_normalizado) || row.rut_display,
+    rut_display: row.rut_display,
+    nombre_completo: row.nombre_completo,
+    cargo: row.cargo || null,
+    establecimiento: row.establecimiento || null,
+  }));
+}
+
+function parseRangoConsulta(query) {
+  const desdeMes = parseIntSafe(query.desde_mes, 1);
+  const desdeAnio = parseIntSafe(query.desde_anio, 2000);
+  const hastaMes = parseIntSafe(query.hasta_mes, 12);
+  const hastaAnio = parseIntSafe(query.hasta_anio, new Date().getFullYear());
+  const desdeKey = desdeAnio * 100 + desdeMes;
+  const hastaKey = hastaAnio * 100 + hastaMes;
+  return {
+    desdeMes,
+    desdeAnio,
+    hastaMes,
+    hastaAnio,
+    desdeKey: Math.min(desdeKey, hastaKey),
+    hastaKey: Math.max(desdeKey, hastaKey),
+  };
+}
+
+async function consultaLiquidacionesPorRut(rut, rango) {
+  const r = await db.query(
+    `SELECT r.id, r.pagina, r.rut_display, r.apellido_paterno, r.apellido_materno, r.nombres,
+            r.nombre_completo, r.cargo, r.establecimiento, r.funcionario_id,
+            p.id AS periodo_id, p.mes, p.anio, p.etiqueta, p.establecimiento AS periodo_establecimiento
+     FROM personal_liquidaciones_registros r
+     JOIN personal_liquidaciones_periodos p ON p.id = r.periodo_id
+     WHERE r.rut_normalizado = $1
+       AND p.estado = 'completo'
+       AND (p.anio * 100 + p.mes) BETWEEN $2 AND $3
+     ORDER BY p.anio, p.mes, r.pagina`,
+    [rut, rango.desdeKey, rango.hastaKey]
+  );
+
+  const funcionario = await db.query(
+    'SELECT id, rut_normalizado, nombre_completo, tipo_funcionario, planta FROM personal_funcionarios WHERE rut_normalizado = $1',
+    [rut]
+  );
+
+  return { rows: r.rows, funcionario: funcionario.rows[0] || null };
+}
+
 /** GET /liquidaciones/periodos */
 router.get('/liquidaciones/periodos', auth, async (req, res) => {
   try {
@@ -152,50 +270,59 @@ router.get('/liquidaciones/periodos/:id/archivo', auth, async (req, res) => {
   }
 });
 
-/** GET /liquidaciones/consulta */
+/** GET /liquidaciones/consulta — por RUT o nombre (apellidos / nombres) */
 router.get('/liquidaciones/consulta', auth, async (req, res) => {
   try {
     if (!requireAccesoPersonal(req, res)) return;
 
-    const rut = resolveRutInput(req.query.rut);
-    if (!rut) {
-      return res.status(400).json({ error: 'Indicá un RUT válido' });
+    const { rut: rutDirecto, termino } = resolveConsultaTermino(req.query);
+    if (!rutDirecto && !termino) {
+      return res.status(400).json({ error: 'Indicá un RUT o nombre para buscar' });
     }
 
-    const desdeMes = parseIntSafe(req.query.desde_mes, 1);
-    const desdeAnio = parseIntSafe(req.query.desde_anio, 2000);
-    const hastaMes = parseIntSafe(req.query.hasta_mes, 12);
-    const hastaAnio = parseIntSafe(req.query.hasta_anio, new Date().getFullYear());
+    const rango = parseRangoConsulta(req.query);
+    const rangoJson = {
+      desde: { mes: rango.desdeMes, anio: rango.desdeAnio },
+      hasta: { mes: rango.hastaMes, anio: rango.hastaAnio },
+    };
 
-    const desdeKey = desdeAnio * 100 + desdeMes;
-    const hastaKey = hastaAnio * 100 + hastaMes;
+    let rut = rutDirecto;
+    if (!rut) {
+      const coincidencias = await buscarCoincidenciasPorNombre(termino);
+      if (!coincidencias.length) {
+        return res.json({
+          multiple: false,
+          termino_busqueda: termino,
+          rut: null,
+          rut_normalizado: null,
+          funcionario: null,
+          ...rangoJson,
+          total: 0,
+          liquidaciones: [],
+        });
+      }
+      if (coincidencias.length > 1) {
+        return res.json({
+          multiple: true,
+          termino_busqueda: termino,
+          coincidencias,
+          ...rangoJson,
+        });
+      }
+      rut = coincidencias[0].rut_normalizado;
+    }
 
-    const r = await db.query(
-      `SELECT r.id, r.pagina, r.rut_display, r.apellido_paterno, r.apellido_materno, r.nombres,
-              r.nombre_completo, r.cargo, r.establecimiento, r.funcionario_id,
-              p.id AS periodo_id, p.mes, p.anio, p.etiqueta, p.establecimiento AS periodo_establecimiento
-       FROM personal_liquidaciones_registros r
-       JOIN personal_liquidaciones_periodos p ON p.id = r.periodo_id
-       WHERE r.rut_normalizado = $1
-         AND p.estado = 'completo'
-         AND (p.anio * 100 + p.mes) BETWEEN $2 AND $3
-       ORDER BY p.anio, p.mes, r.pagina`,
-      [rut, Math.min(desdeKey, hastaKey), Math.max(desdeKey, hastaKey)]
-    );
-
-    const funcionario = await db.query(
-      'SELECT id, rut_normalizado, nombre_completo, tipo_funcionario, planta FROM personal_funcionarios WHERE rut_normalizado = $1',
-      [rut]
-    );
+    const { rows, funcionario } = await consultaLiquidacionesPorRut(rut, rango);
 
     res.json({
+      multiple: false,
+      termino_busqueda: termino || null,
       rut: formatearRut(rut),
       rut_normalizado: rut,
-      funcionario: funcionario.rows[0] || null,
-      desde: { mes: desdeMes, anio: desdeAnio },
-      hasta: { mes: hastaMes, anio: hastaAnio },
-      total: r.rows.length,
-      liquidaciones: r.rows.map((row) => ({
+      funcionario,
+      ...rangoJson,
+      total: rows.length,
+      liquidaciones: rows.map((row) => ({
         ...row,
         periodo_label: periodoLabel(row),
       })),
