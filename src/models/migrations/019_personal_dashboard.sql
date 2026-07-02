@@ -45,9 +45,9 @@ CREATE TABLE IF NOT EXISTS personal_documentos (
   created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_personal_documentos_activo_por_tipo
-  ON personal_documentos (funcionario_id, tipo_documental)
-  WHERE es_activo = TRUE;
+-- El índice único por tipo activo se define en 020_personal_consolidado_antiguo.sql.
+-- Evita fallo al re-ejecutar migraciones si ya hay datos duplicados en producción.
+DROP INDEX IF EXISTS idx_personal_documentos_activo_por_tipo;
 
 CREATE INDEX IF NOT EXISTS idx_personal_documentos_funcionario ON personal_documentos (funcionario_id);
 CREATE INDEX IF NOT EXISTS idx_personal_documentos_tipo ON personal_documentos (tipo_documental);
