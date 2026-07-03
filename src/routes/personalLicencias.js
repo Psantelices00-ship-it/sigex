@@ -120,7 +120,7 @@ async function obtenerFuncionarioPorRut(rut) {
 
 async function ultimoMaestroHasta(rut, periodoKey) {
   const r = await db.query(
-    `SELECT mr.*, p.mes, p.anio, p.etiqueta
+    `SELECT mr.*, p.mes, p.anio
      FROM personal_maestro_remuneraciones mr
      JOIN personal_maestro_remuneraciones_periodos p ON p.id = mr.periodo_id
      WHERE mr.rut_normalizado = $1
