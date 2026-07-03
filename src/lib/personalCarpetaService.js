@@ -1,5 +1,4 @@
 const axios = require('axios');
-const archiver = require('archiver');
 const db = require('../db');
 const { formatearRut } = require('./rutChileno');
 const {
@@ -136,6 +135,11 @@ async function armarResumenCarpeta(funcionarioId) {
   };
 }
 
+async function loadArchiver() {
+  const mod = await import('archiver');
+  return mod.default || mod;
+}
+
 /**
  * @param {object} opts
  * @param {import('express').Response} opts.res
@@ -153,6 +157,7 @@ async function exportarCarpetaZip(opts) {
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', `attachment; filename="${baseName}.zip"`);
 
+  const archiver = await loadArchiver();
   const archive = archiver('zip', { zlib: { level: 6 } });
   archive.on('error', (err) => {
     throw err;
