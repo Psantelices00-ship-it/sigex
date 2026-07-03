@@ -12,11 +12,13 @@ const personalImportaciones = require('./personalImportaciones')
 const personalFuncionarios = require('./personalFuncionarios')
 
 const personalLiquidaciones = require('./personalLiquidaciones');
+const personalLicencias = require('./personalLicencias');
 
 router.use(personalDocumentos)
 router.use(personalImportaciones)
 router.use(personalFuncionarios)
 router.use(personalLiquidaciones)
+router.use(personalLicencias)
 
 const upload = multer({
   storage: multer.memoryStorage(),
