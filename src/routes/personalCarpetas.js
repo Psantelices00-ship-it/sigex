@@ -24,6 +24,47 @@ function nombreBusquedaTokens(input) {
   return whole.length >= 3 ? [whole] : [];
 }
 
+function sqlNombreTokens(haystackExpr, tokens, params) {
+  let clause = '';
+  for (const tok of tokens) {
+    params.push(`%${tok}%`);
+    clause += ` AND LOWER(${haystackExpr}) LIKE $${params.length}`;
+  }
+  return clause;
+}
+
+async function buscarCoincidenciasPorNombre(termino) {
+  const tokens = nombreBusquedaTokens(termino);
+  if (!tokens.length) return [];
+
+  const params = [];
+  const funcClause = sqlNombreTokens("COALESCE(nombre_completo, '')", tokens, params);
+  const r = await db.query(
+    `SELECT id, rut_normalizado, rut_numero, rut_dv, nombre_completo, tipo_funcionario,
+            estado_laboral, activo, planta, ubicacion
+     FROM personal_funcionarios
+     WHERE 1=1${funcClause}
+     ORDER BY nombre_completo
+     LIMIT 26`,
+    params
+  );
+  return r.rows;
+}
+
+function mapCoincidencia(f) {
+  return {
+    id: f.id,
+    rut: formatearRut(f.rut_normalizado),
+    rut_normalizado: f.rut_normalizado,
+    nombre_completo: f.nombre_completo,
+    tipo_funcionario: f.tipo_funcionario,
+    estado_laboral: f.estado_laboral,
+    activo: f.activo,
+    planta: f.planta,
+    ubicacion: f.ubicacion,
+  };
+}
+
 /** GET /carpetas/consulta — buscar funcionario (activos e inactivos) */
 router.get('/carpetas/consulta', auth, async (req, res) => {
   try {
@@ -48,42 +89,18 @@ router.get('/carpetas/consulta', auth, async (req, res) => {
       return res.json(resumen);
     }
 
-    const tokens = nombreBusquedaTokens(termino);
-    if (!tokens.length) {
+    if (!nombreBusquedaTokens(termino).length) {
       return res.status(400).json({ error: 'Indicá al menos 3 caracteres para buscar por nombre' });
     }
 
-    const all = await db.query(
-      `SELECT id, rut_normalizado, rut_numero, rut_dv, nombre_completo, tipo_funcionario,
-              estado_laboral, activo, planta, ubicacion
-       FROM personal_funcionarios
-       ORDER BY nombre_completo
-       LIMIT 2000`
-    );
-
-    const qLower = termino.toLowerCase();
-    let rows = all.rows.filter((f) => {
-      const nombre = String(f.nombre_completo || '').toLowerCase();
-      return tokens.every((t) => nombre.includes(t)) || nombre.includes(qLower);
-    });
-
+    const rows = await buscarCoincidenciasPorNombre(termino);
     if (!rows.length) {
       return res.status(404).json({ error: 'No se encontraron funcionarios con ese nombre' });
     }
 
     if (rows.length > 1) {
       return res.json({
-        coincidencias: rows.slice(0, 25).map((f) => ({
-          id: f.id,
-          rut: formatearRut(f.rut_normalizado),
-          rut_normalizado: f.rut_normalizado,
-          nombre_completo: f.nombre_completo,
-          tipo_funcionario: f.tipo_funcionario,
-          estado_laboral: f.estado_laboral,
-          activo: f.activo,
-          planta: f.planta,
-          ubicacion: f.ubicacion,
-        })),
+        coincidencias: rows.slice(0, 25).map(mapCoincidencia),
       });
     }
 
