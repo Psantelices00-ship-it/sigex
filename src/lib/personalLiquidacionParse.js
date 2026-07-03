@@ -76,6 +76,17 @@ function parseNameLine(line) {
   };
 }
 
+function parseTopeImponible(text) {
+  const idx = String(text || '').search(/Tope Imponible/i);
+  if (idx < 0) return null;
+  const chunk = String(text).slice(idx, idx + 140);
+  const nums = chunk.match(/\d{1,3}(?:\.\d{3})+/g);
+  if (!nums || nums.length < 2) return null;
+  const raw = nums[1];
+  const n = parseInt(String(raw).replace(/\./g, ''), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 function parseLiquidacionBlock(text, pagina) {
   const rutM = text.match(/(\d{1,2}\.\d{3}\.\d{3}-[\dkK])/i);
   if (!rutM) return null;
@@ -118,6 +129,7 @@ function parseLiquidacionBlock(text, pagina) {
     establecimiento: estM ? estM[0].replace(/\s+/g, ' ').trim() : null,
     mes,
     anio,
+    monto_imponible: parseTopeImponible(text),
   };
 }
 
@@ -153,5 +165,6 @@ module.exports = {
   etiquetaPeriodo,
   parseLiquidacionesPdf,
   parseLiquidacionBlock,
+  parseTopeImponible,
   splitLiquidacionBlocks,
 };

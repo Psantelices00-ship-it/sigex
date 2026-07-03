@@ -134,23 +134,49 @@ async function ultimoMaestroHasta(rut, periodoKey) {
 
 async function ultimasImponibles(rut, periodoKey, limite = 3) {
   const r = await db.query(
+    `SELECT lr.monto_imponible, p.mes, p.anio
+     FROM personal_liquidaciones_registros lr
+     JOIN personal_liquidaciones_periodos p ON p.id = lr.periodo_id
+     WHERE lr.rut_normalizado = $1
+       AND p.estado = 'completo'
+       AND lr.monto_imponible IS NOT NULL
+       AND lr.monto_imponible > 0
+       AND (p.anio * 100 + p.mes) <= $2
+     ORDER BY p.anio DESC, p.mes DESC
+     LIMIT $3`,
+    [rut, periodoKey, limite]
+  );
+  if (r.rows.length) {
+    return r.rows
+      .map((row) => ({
+        mes: row.mes,
+        anio: row.anio,
+        etiqueta: etiquetaPeriodo(row.mes, row.anio),
+        monto_imponible: Number(row.monto_imponible),
+        fuente: 'liquidacion',
+      }))
+      .reverse();
+  }
+
+  const mr = await db.query(
     `SELECT mr.imposiciones, p.mes, p.anio
      FROM personal_maestro_remuneraciones mr
      JOIN personal_maestro_remuneraciones_periodos p ON p.id = mr.periodo_id
      WHERE mr.rut_normalizado = $1
        AND (p.anio * 100 + p.mes) <= $2
-       AND mr.imposiciones IS NOT NULL
-       AND mr.imposiciones > 0
+       AND mr.sueldos IS NOT NULL
+       AND mr.sueldos > 0
      ORDER BY p.anio DESC, p.mes DESC
      LIMIT $3`,
     [rut, periodoKey, limite]
   );
-  return r.rows
+  return mr.rows
     .map((row) => ({
       mes: row.mes,
       anio: row.anio,
       etiqueta: etiquetaPeriodo(row.mes, row.anio),
-      monto_imponible: Number(row.imposiciones),
+      monto_imponible: Number(row.sueldos),
+      fuente: 'maestro_sueldos',
     }))
     .reverse();
 }

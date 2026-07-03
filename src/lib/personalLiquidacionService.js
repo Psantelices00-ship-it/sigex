@@ -29,7 +29,7 @@ async function insertRegistrosBatch(periodoId, registros) {
     for (const reg of slice) {
       const funcionarioId = funcMap.get(reg.rut_normalizado) || null;
       values.push(
-        `($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++})`
+        `($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++})`
       );
       params.push(
         periodoId,
@@ -42,13 +42,14 @@ async function insertRegistrosBatch(periodoId, registros) {
         reg.nombre_completo,
         reg.cargo,
         reg.establecimiento,
-        funcionarioId
+        funcionarioId,
+        reg.monto_imponible ?? null
       );
     }
     await db.query(
       `INSERT INTO personal_liquidaciones_registros
         (periodo_id, pagina, rut_normalizado, rut_display, apellido_paterno, apellido_materno,
-         nombres, nombre_completo, cargo, establecimiento, funcionario_id)
+         nombres, nombre_completo, cargo, establecimiento, funcionario_id, monto_imponible)
        VALUES ${values.join(', ')}`,
       params
     );
