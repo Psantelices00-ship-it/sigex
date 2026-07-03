@@ -7,11 +7,23 @@ const { requireAccesoPersonal, requireGestionPersonal } = require('../lib/person
 const { registrarAuditoriaPersonal } = require('../lib/personalAuditoria');
 const { etiquetaPeriodo } = require('../lib/personalLiquidacionParse');
 const { parseMaestroRemuneracionesExcel } = require('../lib/personalMaestroRemuneracionesParse');
+const { parseLicenciasHistorialExcel } = require('../lib/personalLicenciasHistorialParse');
+const { importarLicenciasHistorial } = require('../lib/personalLicenciasHistorialImport');
 const { armarDatosFormularioLicencia, diasEntreFechas } = require('../lib/personalLicenciasCodigos');
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const name = String(file.originalname || '').toLowerCase();
+    if (name.endsWith('.xls') || name.endsWith('.xlsx')) return cb(null, true);
+    cb(new Error('Solo se aceptan archivos Excel (.xls o .xlsx)'));
+  },
+});
+
+const uploadHistorial = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const name = String(file.originalname || '').toLowerCase();
     if (name.endsWith('.xls') || name.endsWith('.xlsx')) return cb(null, true);
@@ -145,7 +157,7 @@ async function ultimasImponibles(rut, periodoKey, limite = 3) {
 
 async function listarLicenciasFuncionario(funcionarioId) {
   const r = await db.query(
-    `SELECT id, funcionario_id, fecha_tramitacion, fecha_inicio, fecha_termino, dias, notas,
+    `SELECT id, funcionario_id, numero_licencia, fecha_tramitacion, fecha_inicio, fecha_termino, dias, notas,
             created_by, updated_by, created_at, updated_at
      FROM personal_licencias
      WHERE funcionario_id = $1
@@ -302,6 +314,52 @@ router.post('/licencias/maestro', auth, upload.single('archivo'), async (req, re
   } catch (err) {
     console.error('[licencias/maestro]', err);
     res.status(500).json({ error: err.message || 'Error al importar maestro' });
+  }
+});
+
+/** POST /licencias/historial/carga-masiva — importar historial desde Excel */
+router.post('/licencias/historial/carga-masiva', auth, uploadHistorial.single('archivo'), async (req, res) => {
+  try {
+    if (!requireGestionPersonal(req, res)) return;
+    if (!req.file?.buffer?.length) {
+      return res.status(400).json({ error: 'Adjuntá el Excel de licencias médicas' });
+    }
+
+    const parsed = parseLicenciasHistorialExcel(req.file.buffer);
+    if (!parsed.rows.length) {
+      return res.status(400).json({
+        error: 'No se encontraron filas válidas',
+        errores: parsed.errores.slice(0, 30),
+      });
+    }
+
+    const resultado = await importarLicenciasHistorial({
+      rows: parsed.rows,
+      usuarioLogin: req.user.login,
+      omitirExistentes: req.body?.reemplazar !== '1',
+    });
+
+    await registrarAuditoriaPersonal(req, {
+      accion: 'licencias_historial_importar',
+      entidad: 'personal_licencias',
+      detalle_json: {
+        archivo: req.file.originalname,
+        total_excel: parsed.total,
+        ...resultado,
+      },
+    });
+
+    res.status(201).json({
+      archivo: req.file.originalname,
+      total_filas_excel: parsed.total,
+      filas_validas: parsed.rows.length,
+      errores_parseo: parsed.errores.length,
+      errores_parseo_muestra: parsed.errores.slice(0, 30),
+      ...resultado,
+    });
+  } catch (err) {
+    console.error('[licencias/historial/carga-masiva]', err);
+    res.status(500).json({ error: err.message || 'Error al importar historial' });
   }
 });
 
