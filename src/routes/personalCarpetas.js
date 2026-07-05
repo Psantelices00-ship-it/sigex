@@ -4,7 +4,13 @@ const auth = require('../middleware/auth');
 const { normalizeRutParts, formatearRut } = require('../lib/rutChileno');
 const { requireAccesoPersonal } = require('../lib/personalPermisos');
 const { registrarAuditoriaPersonal } = require('../lib/personalAuditoria');
-const { armarResumenCarpeta, exportarCarpetaZip } = require('../lib/personalCarpetaService');
+const {
+  armarResumenCarpeta,
+  listarCarpetasResumen,
+  exportarCarpetaZip,
+  exportarCarpetasMasivoZip,
+  datosExportCarpeta,
+} = require('../lib/personalCarpetaService');
 
 function resolveRutInput(input) {
   const raw = String(input || '').trim();
@@ -64,6 +70,21 @@ function mapCoincidencia(f) {
     ubicacion: f.ubicacion,
   };
 }
+
+/** GET /carpetas — listado de todas las carpetas con resumen */
+router.get('/carpetas', auth, async (req, res) => {
+  try {
+    if (!requireAccesoPersonal(req, res)) return;
+    const data = await listarCarpetasResumen({
+      q: req.query?.q,
+      estado: req.query?.estado || 'todos',
+    });
+    res.json(data);
+  } catch (err) {
+    console.error('[carpetas/listado]', err);
+    res.status(500).json({ error: err.message || 'Error al listar carpetas' });
+  }
+});
 
 /** GET /carpetas/consulta — buscar funcionario (activos e inactivos) */
 router.get('/carpetas/consulta', auth, async (req, res) => {
@@ -129,23 +150,9 @@ router.post('/carpetas/funcionarios/:id/exportar-zip', auth, async (req, res) =>
   try {
     if (!requireAccesoPersonal(req, res)) return;
 
-    const resumen = await armarResumenCarpeta(req.params.id);
-    if (!resumen) return res.status(404).json({ error: 'Funcionario no encontrado' });
-
     const incluirLiquidaciones = req.body?.incluir_liquidaciones !== false;
-    let liquidacionesRows = [];
-    if (incluirLiquidaciones && resumen.liquidaciones_total) {
-      const liq = await db.query(
-        `SELECT lr.pagina, p.mes, p.anio, p.etiqueta, p.file_path
-         FROM personal_liquidaciones_registros lr
-         JOIN personal_liquidaciones_periodos p ON p.id = lr.periodo_id
-         WHERE lr.rut_normalizado = $1 AND p.estado = 'completo'
-           AND p.file_path IS NOT NULL AND trim(p.file_path) <> ''
-         ORDER BY p.anio, p.mes`,
-        [resumen.funcionario.rut_normalizado]
-      );
-      liquidacionesRows = liq.rows;
-    }
+    const pack = await datosExportCarpeta(req.params.id, incluirLiquidaciones);
+    if (!pack) return res.status(404).json({ error: 'Funcionario no encontrado' });
 
     await registrarAuditoriaPersonal(req, {
       accion: 'carpeta_exportar_zip',
@@ -153,30 +160,57 @@ router.post('/carpetas/funcionarios/:id/exportar-zip', auth, async (req, res) =>
       entidad_id: req.params.id,
       funcionario_id: req.params.id,
       detalle_json: {
-        documentos: resumen.documentos.length,
-        liquidaciones: liquidacionesRows.length,
+        documentos: pack.resumen.documentos.length,
+        liquidaciones: pack.liquidacionesRows.length,
       },
     });
 
     await exportarCarpetaZip({
       res,
-      funcionario: resumen.funcionario,
-      documentos: resumen.documentos,
-      liquidaciones: liquidacionesRows,
-      resumenJson: {
-        exportado_en: new Date().toISOString(),
-        funcionario: resumen.funcionario,
-        documentos_resumen: resumen.documentos_resumen,
-        licencias: resumen.licencias,
-        liquidaciones_total: resumen.liquidaciones_total,
-        archivos_incluidos: resumen.documentos.length,
-        liquidaciones_incluidas: liquidacionesRows.length,
-      },
+      funcionario: pack.resumen.funcionario,
+      documentos: pack.resumen.documentos,
+      liquidaciones: pack.liquidacionesRows,
+      resumenJson: pack.resumenJson,
     });
   } catch (err) {
     console.error('[carpetas/exportar-zip]', err);
     if (!res.headersSent) {
       res.status(500).json({ error: err.message || 'Error al exportar carpeta' });
+    }
+  }
+});
+
+/** POST /carpetas/exportar-masivo — ZIP con varias carpetas (subcarpeta por funcionario) */
+router.post('/carpetas/exportar-masivo', auth, async (req, res) => {
+  try {
+    if (!requireAccesoPersonal(req, res)) return;
+
+    const ids = Array.isArray(req.body?.funcionario_ids) ? req.body.funcionario_ids : [];
+    if (!ids.length) {
+      return res.status(400).json({ error: 'Indicá al menos un funcionario para exportar' });
+    }
+    if (ids.length > 500) {
+      return res.status(400).json({
+        error: 'Máximo 500 carpetas por ZIP consolidado. Usá «Guardar en carpeta» para lotes mayores.',
+      });
+    }
+
+    const incluirLiquidaciones = req.body?.incluir_liquidaciones !== false;
+
+    await registrarAuditoriaPersonal(req, {
+      accion: 'carpeta_exportar_masivo',
+      entidad: 'personal_funcionarios',
+      detalle_json: { cantidad: ids.length, incluir_liquidaciones: incluirLiquidaciones },
+    });
+
+    await exportarCarpetasMasivoZip(res, {
+      funcionarioIds: ids,
+      incluirLiquidaciones,
+    });
+  } catch (err) {
+    console.error('[carpetas/exportar-masivo]', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message || 'Error al exportar carpetas' });
     }
   }
 });

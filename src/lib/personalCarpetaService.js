@@ -135,36 +135,122 @@ async function armarResumenCarpeta(funcionarioId) {
   };
 }
 
+function carpetaZipBaseName(funcionario) {
+  return sanitizeFilename(`${funcionario.rut_normalizado}_${funcionario.nombre_completo || 'carpeta'}`);
+}
+
+async function liquidacionesRowsForFuncionario(rutNormalizado) {
+  const liq = await db.query(
+    `SELECT lr.pagina, p.mes, p.anio, p.etiqueta, p.file_path
+     FROM personal_liquidaciones_registros lr
+     JOIN personal_liquidaciones_periodos p ON p.id = lr.periodo_id
+     WHERE lr.rut_normalizado = $1 AND p.estado = 'completo'
+       AND p.file_path IS NOT NULL AND trim(p.file_path) <> ''
+     ORDER BY p.anio, p.mes`,
+    [rutNormalizado]
+  );
+  return liq.rows;
+}
+
+async function listarCarpetasResumen(filters = {}) {
+  const estado = String(filters.estado || 'todos').trim();
+  const q = String(filters.q || '').trim().toLowerCase();
+
+  let sql = `
+    SELECT f.id, f.rut_normalizado, f.rut_numero, f.rut_dv, f.nombre_completo,
+           f.tipo_funcionario, f.estado_laboral, f.activo, f.planta, f.ubicacion,
+           f.tipo_contrato, f.fecha_ingreso,
+           COUNT(d.id) FILTER (WHERE d.es_activo) AS total_documentos,
+           COUNT(d.id) FILTER (WHERE d.es_activo AND d.tipo_documental = 'consolidado_antiguo') AS consolidados,
+           COUNT(d.id) FILTER (WHERE d.es_activo AND d.tipo_documental = 'anexo') AS anexos,
+           COUNT(d.id) FILTER (
+             WHERE d.es_activo AND d.tipo_documental NOT IN ('anexo', 'consolidado_antiguo')
+           ) AS obligatorios_cargados
+    FROM personal_funcionarios f
+    LEFT JOIN personal_documentos d ON d.funcionario_id = f.id
+    WHERE 1=1`;
+  const params = [];
+  if (estado === 'activo' || estado === 'inactivo') {
+    params.push(estado);
+    sql += ` AND f.estado_laboral = $${params.length}`;
+  }
+  sql += ` GROUP BY f.id ORDER BY f.nombre_completo`;
+
+  const [funcs, licAgg, liqAgg] = await Promise.all([
+    db.query(sql, params),
+    db.query(`SELECT funcionario_id, COUNT(*)::int AS total FROM personal_licencias GROUP BY funcionario_id`),
+    db.query(
+      `SELECT lr.rut_normalizado, COUNT(*)::int AS total
+       FROM personal_liquidaciones_registros lr
+       JOIN personal_liquidaciones_periodos p ON p.id = lr.periodo_id
+       WHERE p.estado = 'completo'
+       GROUP BY lr.rut_normalizado`
+    ),
+  ]);
+
+  const licMap = new Map(licAgg.rows.map((r) => [String(r.funcionario_id), r.total]));
+  const liqMap = new Map(liqAgg.rows.map((r) => [r.rut_normalizado, r.total]));
+
+  let carpetas = funcs.rows.map((f) => {
+    const totalObligatorios = tiposObligatoriosParaFuncionario(f.tipo_funcionario).length;
+    const obligatoriosCargados = parseInt(f.obligatorios_cargados, 10) || 0;
+    return {
+      id: f.id,
+      rut: formatearRut(f.rut_normalizado),
+      rut_normalizado: f.rut_normalizado,
+      nombre_completo: f.nombre_completo,
+      tipo_funcionario: f.tipo_funcionario,
+      estado_laboral: f.estado_laboral,
+      activo: f.activo,
+      planta: f.planta,
+      ubicacion: f.ubicacion,
+      tipo_contrato: f.tipo_contrato,
+      fecha_ingreso: f.fecha_ingreso,
+      resumen: {
+        total_documentos: parseInt(f.total_documentos, 10) || 0,
+        consolidados: parseInt(f.consolidados, 10) || 0,
+        anexos: parseInt(f.anexos, 10) || 0,
+        obligatorios_cargados: obligatoriosCargados,
+        total_obligatorios: totalObligatorios,
+        faltantes: Math.max(0, totalObligatorios - obligatoriosCargados),
+        licencias: licMap.get(String(f.id)) || 0,
+        liquidaciones: liqMap.get(f.rut_normalizado) || 0,
+      },
+    };
+  });
+
+  if (q) {
+    const qDigits = q.replace(/\D/g, '');
+    carpetas = carpetas.filter((c) => {
+      const nombre = String(c.nombre_completo || '').toLowerCase();
+      if (nombre.includes(q)) return true;
+      if (qDigits.length >= 3) {
+        const rutDigits = String(c.rut_normalizado || '').replace(/\D/g, '');
+        return rutDigits.includes(qDigits);
+      }
+      return false;
+    });
+  }
+
+  return { total: carpetas.length, carpetas };
+}
+
 async function loadArchiver() {
   const mod = await import('archiver');
   return mod.default || mod;
 }
 
 /**
+ * @param {import('archiver').Archiver} archive
  * @param {object} opts
- * @param {import('express').Response} opts.res
- * @param {object} opts.funcionario
- * @param {object[]} opts.documentos
- * @param {object[]} [opts.liquidaciones]
- * @param {object} opts.resumenJson
  */
-async function exportarCarpetaZip(opts) {
-  const { res, funcionario, documentos, liquidaciones, resumenJson } = opts;
-  const baseName = sanitizeFilename(
-    `${funcionario.rut_normalizado}_${funcionario.nombre_completo || 'carpeta'}`
-  );
+async function appendCarpetaToArchive(archive, opts) {
+  const { funcionario, documentos, liquidaciones, resumenJson, basePrefix = '' } = opts;
+  const root = basePrefix ? `${String(basePrefix).replace(/\/$/, '')}/` : '';
 
-  res.setHeader('Content-Type', 'application/zip');
-  res.setHeader('Content-Disposition', `attachment; filename="${baseName}.zip"`);
-
-  const archiver = await loadArchiver();
-  const archive = archiver('zip', { zlib: { level: 6 } });
-  archive.on('error', (err) => {
-    throw err;
+  archive.append(JSON.stringify(resumenJson, null, 2), {
+    name: `${root}resumen/resumen_funcionario.json`,
   });
-  archive.pipe(res);
-
-  archive.append(JSON.stringify(resumenJson, null, 2), { name: 'resumen/resumen_funcionario.json' });
 
   for (const doc of documentos) {
     if (!doc.file_path) continue;
@@ -176,11 +262,11 @@ async function exportarCarpetaZip(opts) {
     try {
       const buf = await fetchFileBuffer(doc.file_path);
       const fname = sanitizeFilename(doc.nombre_archivo || `${doc.tipo_documental}.pdf`);
-      archive.append(buf, { name: `${folder}/${fname}` });
+      archive.append(buf, { name: `${root}${folder}/${fname}` });
     } catch {
       archive.append(
         JSON.stringify({ error: 'No se pudo descargar', doc_id: doc.id, tipo: doc.tipo_documental }),
-        { name: `${folder}/ERROR_${doc.id}.json` }
+        { name: `${root}${folder}/ERROR_${doc.id}.json` }
       );
     }
   }
@@ -193,18 +279,120 @@ async function exportarCarpetaZip(opts) {
         const label = sanitizeFilename(
           `${liq.anio}-${String(liq.mes).padStart(2, '0')}_${liq.etiqueta || 'liquidacion'}.pdf`
         );
-        archive.append(pdf, { name: `liquidaciones/${label}` });
+        archive.append(pdf, { name: `${root}liquidaciones/${label}` });
       } catch {
         /* omitir liquidación fallida */
       }
     }
   }
+}
 
+async function datosExportCarpeta(funcionarioId, incluirLiquidaciones = true) {
+  const resumen = await armarResumenCarpeta(funcionarioId);
+  if (!resumen) return null;
+  let liquidacionesRows = [];
+  if (incluirLiquidaciones && resumen.liquidaciones_total) {
+    liquidacionesRows = await liquidacionesRowsForFuncionario(resumen.funcionario.rut_normalizado);
+  }
+  return {
+    resumen,
+    liquidacionesRows,
+    resumenJson: {
+      exportado_en: new Date().toISOString(),
+      funcionario: resumen.funcionario,
+      documentos_resumen: resumen.documentos_resumen,
+      licencias: resumen.licencias,
+      liquidaciones_total: resumen.liquidaciones_total,
+      archivos_incluidos: resumen.documentos.length,
+      liquidaciones_incluidas: liquidacionesRows.length,
+    },
+  };
+}
+
+/**
+ * @param {object} opts
+ * @param {import('express').Response} opts.res
+ */
+async function exportarCarpetaZip(opts) {
+  const { res, funcionario, documentos, liquidaciones, resumenJson } = opts;
+  const baseName = carpetaZipBaseName(funcionario);
+
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="${baseName}.zip"`);
+
+  const archiver = await loadArchiver();
+  const archive = archiver('zip', { zlib: { level: 6 } });
+  archive.on('error', (err) => {
+    throw err;
+  });
+  archive.pipe(res);
+
+  await appendCarpetaToArchive(archive, { funcionario, documentos, liquidaciones, resumenJson });
+  await archive.finalize();
+}
+
+/**
+ * @param {import('express').Response} res
+ * @param {object} opts
+ * @param {string[]} opts.funcionarioIds
+ */
+async function exportarCarpetasMasivoZip(res, opts) {
+  const { funcionarioIds, incluirLiquidaciones = true } = opts;
+  const ids = [...new Set((funcionarioIds || []).map((id) => String(id).trim()).filter(Boolean))];
+  if (!ids.length) throw new Error('No hay funcionarios para exportar');
+
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="carpetas_funcionarias_SIGEX_${ids.length}.zip"`
+  );
+
+  const archiver = await loadArchiver();
+  const archive = archiver('zip', { zlib: { level: 6 } });
+  archive.on('error', (err) => {
+    throw err;
+  });
+  archive.pipe(res);
+
+  const meta = {
+    exportado_en: new Date().toISOString(),
+    total_solicitado: ids.length,
+    incluir_liquidaciones: incluirLiquidaciones,
+    funcionarios: [],
+  };
+
+  for (const id of ids) {
+    const pack = await datosExportCarpeta(id, incluirLiquidaciones);
+    if (!pack) continue;
+    const prefix = carpetaZipBaseName(pack.resumen.funcionario);
+    await appendCarpetaToArchive(archive, {
+      funcionario: pack.resumen.funcionario,
+      documentos: pack.resumen.documentos,
+      liquidaciones: pack.liquidacionesRows,
+      resumenJson: pack.resumenJson,
+      basePrefix: prefix,
+    });
+    meta.funcionarios.push({
+      id: pack.resumen.funcionario.id,
+      rut: pack.resumen.funcionario.rut,
+      nombre: pack.resumen.funcionario.nombre_completo,
+      documentos: pack.resumen.documentos.length,
+      liquidaciones: pack.liquidacionesRows.length,
+    });
+  }
+
+  meta.total_exportado = meta.funcionarios.length;
+  archive.append(JSON.stringify(meta, null, 2), { name: 'resumen/exportacion_masiva.json' });
   await archive.finalize();
 }
 
 module.exports = {
   armarResumenCarpeta,
+  listarCarpetasResumen,
   exportarCarpetaZip,
+  exportarCarpetasMasivoZip,
+  datosExportCarpeta,
+  liquidacionesRowsForFuncionario,
   docsResumenForFuncionario,
+  carpetaZipBaseName,
 };
