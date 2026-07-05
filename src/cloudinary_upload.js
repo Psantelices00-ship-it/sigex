@@ -1,5 +1,6 @@
 const cloudinary = require('./cloudinary');
 const streamifier = require('streamifier');
+const { prepararBufferParaCloudinary } = require('./lib/cloudinaryPdfPrepare');
 
 /** PDF y binarios no deben ir a `image/upload` (Safari no los muestra); usamos `raw`. */
 function resourceTypeForUpload(mimetype, originalname) {
@@ -15,7 +16,8 @@ function resourceTypeForUpload(mimetype, originalname) {
  * @param {string} folder subcarpeta bajo sigex/
  * @param {{ mimetype?: string, originalname?: string }} [fileMeta] para elegir resource_type
  */
-function uploadToCloudinary(buffer, filename, folder, fileMeta = {}) {
+async function uploadToCloudinary(buffer, filename, folder, fileMeta = {}) {
+  const prepared = await prepararBufferParaCloudinary(buffer, fileMeta);
   const resource_type = resourceTypeForUpload(fileMeta.mimetype, fileMeta.originalname);
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
@@ -30,7 +32,7 @@ function uploadToCloudinary(buffer, filename, folder, fileMeta = {}) {
         else resolve(result);
       }
     );
-    streamifier.createReadStream(buffer).pipe(stream);
+    streamifier.createReadStream(prepared).pipe(stream);
   });
 }
 
