@@ -249,9 +249,9 @@ async function listarCarpetasResumen(filters = {}) {
   return { total: carpetas.length, carpetas };
 }
 
-async function loadArchiver() {
-  const mod = await import('archiver');
-  return mod.default || mod;
+async function createZipArchive() {
+  const { ZipArchive } = await import('archiver');
+  return new ZipArchive({ zlib: { level: 6 } });
 }
 
 /**
@@ -337,8 +337,7 @@ async function exportarCarpetaZip(opts) {
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', contentDispositionAttachment(`${baseName}.zip`));
 
-  const archiver = await loadArchiver();
-  const archive = archiver('zip', { zlib: { level: 6 } });
+  const archive = await createZipArchive();
 
   await new Promise((resolve, reject) => {
     archive.on('error', reject);
@@ -367,8 +366,7 @@ async function exportarCarpetasMasivoZip(res, opts) {
     contentDispositionAttachment(`carpetas_funcionarias_SIGEX_${ids.length}.zip`)
   );
 
-  const archiver = await loadArchiver();
-  const archive = archiver('zip', { zlib: { level: 6 } });
+  const archive = await createZipArchive();
 
   await new Promise(async (resolve, reject) => {
     archive.on('error', reject);
