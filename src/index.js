@@ -30,7 +30,7 @@ app.get('/', (req, res) =>
   res.json({
     sistema: 'SIGEX',
     version: '1.1.0',
-    build: '2026-07-05-cloudinary-pdf-compress',
+    build: '2026-07-07-personal-carpetas-fix',
     estado: 'activo',
     modulos: [
       'auth',

@@ -11,9 +11,18 @@ const { etiquetaPeriodo } = require('./personalLiquidacionParse');
 
 function sanitizeFilename(name) {
   return String(name || 'archivo')
-    .replace(/[^\w\s.\-áéíóúñÁÉÍÓÚÑ]/g, '_')
-    .replace(/\s+/g, '_')
-    .slice(0, 120);
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\w.\-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '')
+    .slice(0, 120) || 'archivo';
+}
+
+function contentDispositionAttachment(filename) {
+  const safe = sanitizeFilename(filename);
+  const encoded = encodeURIComponent(safe);
+  return `attachment; filename="${safe}"; filename*=UTF-8''${encoded}`;
 }
 
 async function fetchFileBuffer(url) {
@@ -74,12 +83,13 @@ async function armarResumenCarpeta(funcionarioId) {
       [funcionarioId]
     ),
     db.query(
-      `SELECT lr.id, lr.pagina, p.mes, p.anio, p.etiqueta, p.file_path
+      `SELECT lr.id, lr.pagina, lr.funcionario_id, p.mes, p.anio, p.etiqueta, p.file_path
        FROM personal_liquidaciones_registros lr
        JOIN personal_liquidaciones_periodos p ON p.id = lr.periodo_id
-       WHERE lr.rut_normalizado = $1 AND p.estado = 'completo'
+       WHERE p.estado = 'completo'
+         AND (lr.funcionario_id = $1 OR lr.rut_normalizado = $2)
        ORDER BY p.anio DESC, p.mes DESC`,
-      [funcionario.rut_normalizado]
+      [funcionarioId, funcionario.rut_normalizado]
     ),
     db.query(
       `SELECT accion, entidad, created_at, detalle_json
@@ -139,15 +149,16 @@ function carpetaZipBaseName(funcionario) {
   return sanitizeFilename(`${funcionario.rut_normalizado}_${funcionario.nombre_completo || 'carpeta'}`);
 }
 
-async function liquidacionesRowsForFuncionario(rutNormalizado) {
+async function liquidacionesRowsForFuncionario(funcionarioId, rutNormalizado) {
   const liq = await db.query(
-    `SELECT lr.pagina, p.mes, p.anio, p.etiqueta, p.file_path
+    `SELECT lr.pagina, lr.id AS registro_id, p.mes, p.anio, p.etiqueta, p.file_path
      FROM personal_liquidaciones_registros lr
      JOIN personal_liquidaciones_periodos p ON p.id = lr.periodo_id
-     WHERE lr.rut_normalizado = $1 AND p.estado = 'completo'
+     WHERE p.estado = 'completo'
        AND p.file_path IS NOT NULL AND trim(p.file_path) <> ''
+       AND (lr.funcionario_id = $1 OR lr.rut_normalizado = $2)
      ORDER BY p.anio, p.mes`,
-    [rutNormalizado]
+    [funcionarioId, rutNormalizado]
   );
   return liq.rows;
 }
@@ -180,16 +191,19 @@ async function listarCarpetasResumen(filters = {}) {
     db.query(sql, params),
     db.query(`SELECT funcionario_id, COUNT(*)::int AS total FROM personal_licencias GROUP BY funcionario_id`),
     db.query(
-      `SELECT lr.rut_normalizado, COUNT(*)::int AS total
-       FROM personal_liquidaciones_registros lr
-       JOIN personal_liquidaciones_periodos p ON p.id = lr.periodo_id
-       WHERE p.estado = 'completo'
-       GROUP BY lr.rut_normalizado`
+      `SELECT f.id AS funcionario_id,
+              COUNT(lr.id) FILTER (WHERE p.estado = 'completo')::int AS total
+       FROM personal_funcionarios f
+       LEFT JOIN personal_liquidaciones_registros lr
+         ON lr.funcionario_id = f.id
+         OR (lr.funcionario_id IS NULL AND lr.rut_normalizado = f.rut_normalizado)
+       LEFT JOIN personal_liquidaciones_periodos p ON p.id = lr.periodo_id
+       GROUP BY f.id`
     ),
   ]);
 
   const licMap = new Map(licAgg.rows.map((r) => [String(r.funcionario_id), r.total]));
-  const liqMap = new Map(liqAgg.rows.map((r) => [r.rut_normalizado, r.total]));
+  const liqMap = new Map(liqAgg.rows.map((r) => [String(r.funcionario_id), r.total]));
 
   let carpetas = funcs.rows.map((f) => {
     const totalObligatorios = tiposObligatoriosParaFuncionario(f.tipo_funcionario).length;
@@ -214,7 +228,7 @@ async function listarCarpetasResumen(filters = {}) {
         total_obligatorios: totalObligatorios,
         faltantes: Math.max(0, totalObligatorios - obligatoriosCargados),
         licencias: licMap.get(String(f.id)) || 0,
-        liquidaciones: liqMap.get(f.rut_normalizado) || 0,
+        liquidaciones: liqMap.get(String(f.id)) || 0,
       },
     };
   });
@@ -292,7 +306,10 @@ async function datosExportCarpeta(funcionarioId, incluirLiquidaciones = true) {
   if (!resumen) return null;
   let liquidacionesRows = [];
   if (incluirLiquidaciones && resumen.liquidaciones_total) {
-    liquidacionesRows = await liquidacionesRowsForFuncionario(resumen.funcionario.rut_normalizado);
+    liquidacionesRows = await liquidacionesRowsForFuncionario(
+      resumen.funcionario.id,
+      resumen.funcionario.rut_normalizado
+    );
   }
   return {
     resumen,
@@ -318,17 +335,20 @@ async function exportarCarpetaZip(opts) {
   const baseName = carpetaZipBaseName(funcionario);
 
   res.setHeader('Content-Type', 'application/zip');
-  res.setHeader('Content-Disposition', `attachment; filename="${baseName}.zip"`);
+  res.setHeader('Content-Disposition', contentDispositionAttachment(`${baseName}.zip`));
 
   const archiver = await loadArchiver();
   const archive = archiver('zip', { zlib: { level: 6 } });
-  archive.on('error', (err) => {
-    throw err;
-  });
-  archive.pipe(res);
 
-  await appendCarpetaToArchive(archive, { funcionario, documentos, liquidaciones, resumenJson });
-  await archive.finalize();
+  await new Promise((resolve, reject) => {
+    archive.on('error', reject);
+    res.on('error', reject);
+    archive.on('end', resolve);
+    archive.pipe(res);
+    appendCarpetaToArchive(archive, { funcionario, documentos, liquidaciones, resumenJson })
+      .then(() => archive.finalize())
+      .catch(reject);
+  });
 }
 
 /**
@@ -344,46 +364,53 @@ async function exportarCarpetasMasivoZip(res, opts) {
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader(
     'Content-Disposition',
-    `attachment; filename="carpetas_funcionarias_SIGEX_${ids.length}.zip"`
+    contentDispositionAttachment(`carpetas_funcionarias_SIGEX_${ids.length}.zip`)
   );
 
   const archiver = await loadArchiver();
   const archive = archiver('zip', { zlib: { level: 6 } });
-  archive.on('error', (err) => {
-    throw err;
+
+  await new Promise(async (resolve, reject) => {
+    archive.on('error', reject);
+    res.on('error', reject);
+    archive.on('end', resolve);
+    archive.pipe(res);
+
+    try {
+      const meta = {
+        exportado_en: new Date().toISOString(),
+        total_solicitado: ids.length,
+        incluir_liquidaciones: incluirLiquidaciones,
+        funcionarios: [],
+      };
+
+      for (const id of ids) {
+        const pack = await datosExportCarpeta(id, incluirLiquidaciones);
+        if (!pack) continue;
+        const prefix = carpetaZipBaseName(pack.resumen.funcionario);
+        await appendCarpetaToArchive(archive, {
+          funcionario: pack.resumen.funcionario,
+          documentos: pack.resumen.documentos,
+          liquidaciones: pack.liquidacionesRows,
+          resumenJson: pack.resumenJson,
+          basePrefix: prefix,
+        });
+        meta.funcionarios.push({
+          id: pack.resumen.funcionario.id,
+          rut: pack.resumen.funcionario.rut,
+          nombre: pack.resumen.funcionario.nombre_completo,
+          documentos: pack.resumen.documentos.length,
+          liquidaciones: pack.liquidacionesRows.length,
+        });
+      }
+
+      meta.total_exportado = meta.funcionarios.length;
+      archive.append(JSON.stringify(meta, null, 2), { name: 'resumen/exportacion_masiva.json' });
+      await archive.finalize();
+    } catch (err) {
+      reject(err);
+    }
   });
-  archive.pipe(res);
-
-  const meta = {
-    exportado_en: new Date().toISOString(),
-    total_solicitado: ids.length,
-    incluir_liquidaciones: incluirLiquidaciones,
-    funcionarios: [],
-  };
-
-  for (const id of ids) {
-    const pack = await datosExportCarpeta(id, incluirLiquidaciones);
-    if (!pack) continue;
-    const prefix = carpetaZipBaseName(pack.resumen.funcionario);
-    await appendCarpetaToArchive(archive, {
-      funcionario: pack.resumen.funcionario,
-      documentos: pack.resumen.documentos,
-      liquidaciones: pack.liquidacionesRows,
-      resumenJson: pack.resumenJson,
-      basePrefix: prefix,
-    });
-    meta.funcionarios.push({
-      id: pack.resumen.funcionario.id,
-      rut: pack.resumen.funcionario.rut,
-      nombre: pack.resumen.funcionario.nombre_completo,
-      documentos: pack.resumen.documentos.length,
-      liquidaciones: pack.liquidacionesRows.length,
-    });
-  }
-
-  meta.total_exportado = meta.funcionarios.length;
-  archive.append(JSON.stringify(meta, null, 2), { name: 'resumen/exportacion_masiva.json' });
-  await archive.finalize();
 }
 
 module.exports = {
