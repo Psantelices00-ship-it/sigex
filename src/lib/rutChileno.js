@@ -47,22 +47,28 @@ function rutPartsFromHyphenated(input) {
   };
 }
 
+function rutPartsFromSevenPlusDv(rawEight) {
+  if (!/^\d{8}$/.test(rawEight)) return null;
+  const sevenBody = rawEight.slice(0, 7);
+  const absorbedDv = rawEight.slice(7);
+  if (rutDvEsperado(sevenBody) !== absorbedDv) return null;
+  return {
+    rut_normalizado: `${sevenBody}${absorbedDv}`,
+    rut_numero: sevenBody,
+    rut_dv: absorbedDv,
+  };
+}
+
 /**
- * Repara el error clásico "9.144.200-0" → cuerpo 91442000 + DV calculado 8.
- * Ocurre cuando se quitan puntos y guión sin respetar el separador del DV.
+ * Repara RUT mal parseados al quitar puntos y guión sin respetar el separador.
+ * Ej.: "9.106.548-7" → cuerpo 91065487 + DV calculado K (91.065.487-K).
+ * También aplica a "9.144.200-0" → 91.442.000-8.
  */
 function tryRepairRutAbsorbedDv(numero, dv) {
-  if (numero.length !== 8 || !numero.endsWith('0') || dv !== rutDvEsperado(numero)) return null;
-
-  const fixedNumero = numero.slice(0, -1);
-  const fixedDv = numero.slice(-1);
-  if (rutDvEsperado(fixedNumero) !== fixedDv) return null;
-
-  return {
-    rut_normalizado: `${fixedNumero}${fixedDv}`,
-    rut_numero: fixedNumero,
-    rut_dv: fixedDv,
-  };
+  const n = String(numero || '');
+  const d = String(dv || '').toUpperCase();
+  if (n.length !== 8 || d !== rutDvEsperado(n)) return null;
+  return rutPartsFromSevenPlusDv(n);
 }
 
 function validarRutChileno(rut) {
@@ -81,12 +87,22 @@ function normalizeRutParts(input) {
   const raw = rutQuitarFormato(input);
   if (!raw) return null;
 
-  if (/^\d{7,8}$/.test(raw)) {
-    const numero = raw;
-    const dv = rutDvEsperado(numero);
+  if (/^\d{8}$/.test(raw)) {
+    const sevenPlus = rutPartsFromSevenPlusDv(raw);
+    if (sevenPlus) return sevenPlus;
+    const dv = rutDvEsperado(raw);
     return {
-      rut_normalizado: `${numero}${dv}`,
-      rut_numero: numero,
+      rut_normalizado: `${raw}${dv}`,
+      rut_numero: raw,
+      rut_dv: dv,
+    };
+  }
+
+  if (/^\d{7}$/.test(raw)) {
+    const dv = rutDvEsperado(raw);
+    return {
+      rut_normalizado: `${raw}${dv}`,
+      rut_numero: raw,
       rut_dv: dv,
     };
   }
@@ -107,11 +123,9 @@ function normalizeRutParts(input) {
 
 /** Intenta corregir un RUT ya almacenado con el dígito verificador absorbido en el cuerpo. */
 function repairStoredRutParts(numero, dv) {
-  const current = normalizeRutParts(`${numero}${dv}`);
   const repaired = tryRepairRutAbsorbedDv(String(numero || ''), String(dv || '').toUpperCase());
-  if (!repaired) return current;
-  if (current && current.rut_normalizado === repaired.rut_normalizado) return current;
-  return repaired;
+  if (repaired) return repaired;
+  return normalizeRutParts(`${numero}${dv}`);
 }
 
 function formatearRut(rut) {
@@ -120,7 +134,7 @@ function formatearRut(rut) {
       ? repairStoredRutParts(rut.rut_numero, rut.rut_dv)
       : null;
   let parts = stored || normalizeRutParts(rut);
-  if (parts) {
+  if (parts && parts.rut_numero.length === 8) {
     const repaired = tryRepairRutAbsorbedDv(parts.rut_numero, parts.rut_dv);
     if (repaired) parts = repaired;
   }

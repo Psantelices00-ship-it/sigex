@@ -11,6 +11,16 @@ const { formatearRut, repairStoredRutParts } = require('../src/lib/rutChileno');
 
 const dryRun = process.argv.includes('--dry-run');
 
+function fmtStored(row) {
+  let n = String(row.rut_numero || '');
+  let out = '';
+  while (n.length > 3) {
+    out = `.${n.slice(-3)}${out}`;
+    n = n.slice(0, -3);
+  }
+  return `${n}${out}-${String(row.rut_dv || '').toUpperCase()}`;
+}
+
 async function updateRutReferences(oldRut, newRut, client) {
   const tables = [
     ['personal_liquidaciones_registros', 'rut_normalizado'],
@@ -44,7 +54,7 @@ async function main() {
       skipped++;
       incidencias.push({
         nombre: row.nombre_completo,
-        actual: formatearRut(row.rut_normalizado),
+        actual: fmtStored(row),
         propuesto: formatearRut(repaired.rut_normalizado),
         error: `Ya existe otro funcionario: ${dup.rows[0].nombre_completo}`,
       });
@@ -52,7 +62,7 @@ async function main() {
     }
 
     console.log(
-      `${dryRun ? '[dry-run] ' : ''}${row.nombre_completo}: ${formatearRut(row.rut_normalizado)} → ${formatearRut(repaired.rut_normalizado)}`
+      `${dryRun ? '[dry-run] ' : ''}${row.nombre_completo}: ${fmtStored(row)} → ${formatearRut(repaired.rut_normalizado)}`
     );
 
     if (!dryRun) {
@@ -72,7 +82,7 @@ async function main() {
         skipped++;
         incidencias.push({
           nombre: row.nombre_completo,
-          actual: formatearRut(row.rut_normalizado),
+          actual: fmtStored(row),
           propuesto: formatearRut(repaired.rut_normalizado),
           error: e.message || String(e),
         });

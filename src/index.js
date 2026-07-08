@@ -30,7 +30,7 @@ app.get('/', (req, res) =>
   res.json({
     sistema: 'SIGEX',
     version: '1.1.0',
-    build: '2026-07-08-rut-funcionarios-fix',
+    build: '2026-07-08-rut-funcionarios-fix-v2',
     estado: 'activo',
     modulos: [
       'auth',
