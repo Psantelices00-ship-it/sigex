@@ -26,7 +26,8 @@
     "db:produccion:admin": "node scripts/crear-admin-produccion.js",
     "db:sql": "node scripts/run-sql-file.js",
     "personal:import-carpetas": "node scripts/importar-carpetas-personal.js",
-    "personal:import-excel": "node scripts/importar-funcionarios-excel.js"
+    "personal:import-excel": "node scripts/importar-funcionarios-excel.js",
+    "personal:reparar-ruts": "node scripts/reparar-ruts-funcionarios.js"
   },
   "dependencies": {
     "archiver": "^8.0.0",
