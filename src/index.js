@@ -30,7 +30,7 @@ app.get('/', (req, res) =>
   res.json({
     sistema: 'SIGEX',
     version: '1.1.0',
-    build: '2026-07-07-carpetas-ver-zip',
+    build: '2026-07-08-usuarios-login-trim',
     estado: 'activo',
     modulos: [
       'auth',
