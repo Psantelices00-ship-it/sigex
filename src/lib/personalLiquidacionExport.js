@@ -57,10 +57,18 @@ async function buildLiquidacionesExportPdf(items) {
 
 /**
  * Extrae una sola página de un PDF mensual.
+ * @param {string} filePath
+ * @param {number} pagina
+ * @param {Map<string, import('pdf-lib').PDFDocument>} [docCache] reutiliza PDFs del mismo mes
  */
-async function extractSinglePagePdf(filePath, pagina) {
-  const buf = await fetchPdfBuffer(filePath);
-  const src = await PDFDocument.load(buf, { ignoreEncryption: true });
+async function extractSinglePagePdf(filePath, pagina, docCache) {
+  const url = String(filePath || '').trim();
+  let src = docCache?.get(url);
+  if (!src) {
+    const buf = await fetchPdfBuffer(url);
+    src = await PDFDocument.load(buf, { ignoreEncryption: true });
+    if (docCache) docCache.set(url, src);
+  }
   const pageIndex = Number(pagina) - 1;
   if (pageIndex < 0 || pageIndex >= src.getPageCount()) {
     throw new Error('Página no encontrada en el PDF mensual');

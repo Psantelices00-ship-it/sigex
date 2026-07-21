@@ -319,10 +319,12 @@ async function appendCarpetaToArchive(archive, opts) {
   }
 
   if (liquidaciones?.length) {
+    // Cache por URL del PDF mensual: evita re-descargar ~10 MB por cada liquidación
+    const pdfDocCache = new Map();
     for (const liq of liquidaciones) {
       if (!liq.file_path || !liq.pagina) continue;
       try {
-        const pdf = await extractSinglePagePdf(liq.file_path, liq.pagina);
+        const pdf = await extractSinglePagePdf(liq.file_path, liq.pagina, pdfDocCache);
         const label = sanitizeFilename(
           `${liq.anio}-${String(liq.mes).padStart(2, '0')}_${liq.etiqueta || 'liquidacion'}.pdf`
         );
@@ -331,6 +333,7 @@ async function appendCarpetaToArchive(archive, opts) {
         /* omitir liquidación fallida */
       }
     }
+    pdfDocCache.clear();
   }
 }
 
@@ -369,17 +372,30 @@ async function exportarCarpetaZip(opts) {
 
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', contentDispositionAttachment(`${baseName}.zip`));
+  // Evita timeouts de proxy en carpetas con muchas liquidaciones
+  if (typeof res.setTimeout === 'function') res.setTimeout(0);
 
   const archive = await createZipArchive();
 
   await new Promise((resolve, reject) => {
-    archive.on('error', reject);
-    res.on('error', reject);
-    archive.on('end', resolve);
+    let settled = false;
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+    const ok = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    archive.on('error', fail);
+    res.on('error', fail);
+    archive.on('end', ok);
     archive.pipe(res);
     appendCarpetaToArchive(archive, { funcionario, documentos, liquidaciones, resumenJson })
       .then(() => archive.finalize())
-      .catch(reject);
+      .catch(fail);
   });
 }
 
