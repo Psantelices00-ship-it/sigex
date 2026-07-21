@@ -20,9 +20,15 @@ function sanitizeFilename(name) {
 }
 
 function contentDispositionAttachment(filename) {
-  const safe = sanitizeFilename(filename);
+  // Conservar espacios (nomenclatura «16035886.AP Talcahuano.zip»); quitar solo caracteres peligrosos
+  const safe = String(filename || 'archivo.zip')
+    .replace(/[/\\?%*:|"<>]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180) || 'archivo.zip';
+  const asciiFallback = sanitizeFilename(safe);
   const encoded = encodeURIComponent(safe);
-  return `attachment; filename="${safe}"; filename*=UTF-8''${encoded}`;
+  return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encoded}`;
 }
 
 async function fetchFileBuffer(url) {
@@ -118,6 +124,8 @@ async function armarResumenCarpeta(funcionarioId) {
       id: funcionario.id,
       rut: formatearRut(funcionario.rut_normalizado),
       rut_normalizado: funcionario.rut_normalizado,
+      rut_numero: funcionario.rut_numero,
+      rut_dv: funcionario.rut_dv,
       nombre_completo: funcionario.nombre_completo,
       tipo_funcionario: funcionario.tipo_funcionario,
       estado_laboral: funcionario.estado_laboral,
@@ -145,8 +153,33 @@ async function armarResumenCarpeta(funcionarioId) {
   };
 }
 
+/** RUT solo cuerpo (sin puntos, guión ni DV). Ej: 16.035.886-6 → 16035886 */
+function rutNumeroSinFormato(funcionario) {
+  if (funcionario?.rut_numero) {
+    const n = String(funcionario.rut_numero).replace(/\D/g, '');
+    if (n) return n;
+  }
+  const raw = String(funcionario?.rut_normalizado || funcionario?.rut || '').trim();
+  if (raw.includes('-')) {
+    return raw.split('-')[0].replace(/\D/g, '');
+  }
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length >= 8) return digits.slice(0, -1);
+  return digits || 'sin_rut';
+}
+
+/**
+ * Nomenclatura ZIP / carpeta interna:
+ * {RUT sin DV}.AP Talcahuano  — ej. 16035886.AP Talcahuano
+ */
 function carpetaZipBaseName(funcionario) {
-  return sanitizeFilename(`${funcionario.rut_normalizado}_${funcionario.nombre_completo || 'carpeta'}`);
+  const codigo = `${rutNumeroSinFormato(funcionario)}.AP Talcahuano`;
+  // Conservar espacios; solo quitar caracteres peligrosos para filesystem
+  return String(codigo)
+    .replace(/[/\\?%*:|"<>]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120) || 'carpeta';
 }
 
 async function liquidacionesRowsForFuncionario(funcionarioId, rutNormalizado) {
