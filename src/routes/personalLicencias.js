@@ -343,6 +343,70 @@ router.post('/licencias/maestro', auth, upload.single('archivo'), async (req, re
   }
 });
 
+/** GET /licencias/historial/estado — cobertura de la base histórica */
+router.get('/licencias/historial/estado', auth, async (req, res) => {
+  try {
+    if (!requireAccesoPersonal(req, res)) return;
+
+    const stats = await db.query(
+      `SELECT
+         COUNT(*)::int AS total_registros,
+         COUNT(DISTINCT funcionario_id)::int AS total_funcionarios,
+         MIN(fecha_inicio) AS fecha_inicio_min,
+         MAX(fecha_inicio) AS fecha_inicio_max,
+         MIN(fecha_termino) AS fecha_termino_min,
+         MAX(fecha_termino) AS fecha_termino_max,
+         MAX(fecha_tramitacion) AS fecha_tramitacion_max,
+         MAX(created_at) AS ultima_insercion
+       FROM personal_licencias`
+    );
+    const row = stats.rows[0] || {};
+
+    let ultimaCarga = null;
+    try {
+      const aud = await db.query(
+        `SELECT created_at, usuario_login, detalle_json
+         FROM personal_auditoria
+         WHERE accion = 'licencias_historial_importar'
+         ORDER BY created_at DESC
+         LIMIT 1`
+      );
+      if (aud.rows.length) {
+        const a = aud.rows[0];
+        const det = typeof a.detalle_json === 'string' ? JSON.parse(a.detalle_json) : a.detalle_json;
+        ultimaCarga = {
+          fecha: a.created_at,
+          usuario: a.usuario_login,
+          archivo: det?.archivo || null,
+          insertadas: det?.insertadas ?? null,
+        };
+      }
+    } catch {
+      /* auditoría opcional */
+    }
+
+    // “Actualizado hasta” = la fecha de término más reciente cargada (cobertura del historial)
+    const actualizadoHasta =
+      row.fecha_termino_max || row.fecha_inicio_max || row.fecha_tramitacion_max || null;
+
+    res.json({
+      total_registros: row.total_registros || 0,
+      total_funcionarios: row.total_funcionarios || 0,
+      fecha_inicio_min: row.fecha_inicio_min,
+      fecha_inicio_max: row.fecha_inicio_max,
+      fecha_termino_min: row.fecha_termino_min,
+      fecha_termino_max: row.fecha_termino_max,
+      fecha_tramitacion_max: row.fecha_tramitacion_max,
+      actualizado_hasta: actualizadoHasta,
+      ultima_insercion: row.ultima_insercion,
+      ultima_carga: ultimaCarga,
+    });
+  } catch (err) {
+    console.error('[licencias/historial/estado]', err);
+    res.status(500).json({ error: err.message || 'Error al consultar estado del historial' });
+  }
+});
+
 /** POST /licencias/historial/carga-masiva — importar historial desde Excel */
 router.post('/licencias/historial/carga-masiva', auth, uploadHistorial.single('archivo'), async (req, res) => {
   try {
@@ -359,6 +423,16 @@ router.post('/licencias/historial/carga-masiva', auth, uploadHistorial.single('a
       });
     }
 
+    // Rango del archivo que se está cargando (para feedback)
+    const fechasArchivo = parsed.rows.reduce(
+      (acc, r) => {
+        if (r.fecha_inicio && (!acc.desde || r.fecha_inicio < acc.desde)) acc.desde = r.fecha_inicio;
+        if (r.fecha_termino && (!acc.hasta || r.fecha_termino > acc.hasta)) acc.hasta = r.fecha_termino;
+        return acc;
+      },
+      { desde: null, hasta: null }
+    );
+
     const resultado = await importarLicenciasHistorial({
       rows: parsed.rows,
       usuarioLogin: req.user.login,
@@ -371,9 +445,17 @@ router.post('/licencias/historial/carga-masiva', auth, uploadHistorial.single('a
       detalle_json: {
         archivo: req.file.originalname,
         total_excel: parsed.total,
+        archivo_desde: fechasArchivo.desde,
+        archivo_hasta: fechasArchivo.hasta,
         ...resultado,
       },
     });
+
+    const cobertura = await db.query(
+      `SELECT MAX(fecha_termino) AS actualizado_hasta,
+              COUNT(*)::int AS total_registros
+       FROM personal_licencias`
+    );
 
     res.status(201).json({
       archivo: req.file.originalname,
@@ -381,6 +463,10 @@ router.post('/licencias/historial/carga-masiva', auth, uploadHistorial.single('a
       filas_validas: parsed.rows.length,
       errores_parseo: parsed.errores.length,
       errores_parseo_muestra: parsed.errores.slice(0, 30),
+      archivo_desde: fechasArchivo.desde,
+      archivo_hasta: fechasArchivo.hasta,
+      actualizado_hasta: cobertura.rows[0]?.actualizado_hasta || null,
+      total_registros_historial: cobertura.rows[0]?.total_registros || 0,
       ...resultado,
     });
   } catch (err) {
