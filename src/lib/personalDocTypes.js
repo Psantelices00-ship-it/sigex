@@ -13,6 +13,8 @@ const PERSONAL_DOC_TIPOS_OBLIGATORIOS = [
   { key: 'certificado_situacion_militar', label: 'Certificado de situación militar', requiere_vencimiento: false, solo_hombres: true },
   { key: 'resolucion_nombramiento', label: 'Resolución de nombramiento', requiere_vencimiento: false, solo_hombres: false },
   { key: 'contrato', label: 'Contrato', requiere_vencimiento: false, solo_hombres: false, solo_asistentes: true },
+  { key: 'termino_contrato', label: 'Término de contrato', requiere_vencimiento: false, solo_hombres: false },
+  { key: 'otros', label: 'Otros', requiere_vencimiento: false, solo_hombres: false },
 ];
 
 /** Anexos: carga manual, varios activos por funcionario. */
