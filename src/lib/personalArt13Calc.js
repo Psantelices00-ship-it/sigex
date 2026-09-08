@@ -1,6 +1,7 @@
 /**
  * Cálculo del bono mensual — Ley N° 21.806, Artículo 13.
- * Proporcional a jornada/44 y a días trabajados/30.
+ * Umbral, límite y aporte se prorratean solo por jornada/44 contra la renta bruta real.
+ * El bono resultante se prorratea después por días trabajados/30.
  */
 const PARAMETROS_2026 = {
   jornadaCompleta: 44,
@@ -104,7 +105,7 @@ function clp(value) {
 }
 
 function calcularBono(jornada, bruto, params) {
-  params = params || PARAMETROS_2026;
+  params = { ...PARAMETROS_2026, ...(params || {}) };
   const jornadaCompleta = Number(params.jornadaCompleta) || 44;
   const umbralBase = Number(params.umbralBruto) || 0;
   const limiteBase = Number(params.limiteBruto) || 0;
@@ -126,6 +127,7 @@ function calcularBono(jornada, bruto, params) {
     aporteMax: 0,
     exceso: 0,
     valorAfecto: 0,
+    bonoMensual: 0,
     bono: 0,
     costo: 0,
     meses,
@@ -153,40 +155,30 @@ function calcularBono(jornada, bruto, params) {
   }
 
   const factorJornada = hrs / jornadaCompleta;
-  const umbralJ = roundExcel(umbralBase * factorJornada, 0);
-  const limiteJ = roundExcel(limiteBase * factorJornada, 0);
-  const aporteJ = roundExcel(aporteBase * factorJornada, 0);
+  const umbral = roundExcel(umbralBase * factorJornada, 0);
+  const limite = roundExcel(limiteBase * factorJornada, 0);
+  const aporteMax = roundExcel(aporteBase * factorJornada, 0);
   const factorDias = dias / diasMes;
-  const umbral = roundExcel(umbralJ * factorDias, 0);
-  const limite = roundExcel(limiteJ * factorDias, 0);
-  const aporteMax = roundExcel(aporteJ * factorDias, 0);
-  const factor = factorJornada * factorDias;
+  const factor = factorJornada;
+
+  let bonoMensual = 0;
+  let exceso = Math.max(0, renta - umbral);
+  let valorAfecto = 0;
+  let criterio;
 
   if (renta >= limite) {
-    return {
-      ok: true,
-      estado: 'SIN DERECHO',
-      factor,
-      factorJornada,
-      factorDias,
-      umbral,
-      limite,
-      aporteMax,
-      exceso: Math.max(0, renta - umbral),
-      valorAfecto: 0,
-      bono: 0,
-      costo: 0,
-      meses,
-      dias,
-      diasMes,
-      renta,
-      criterio: 'La remuneración bruta iguala o supera el límite proporcional (jornada y días).',
-    };
+    exceso = Math.max(0, renta - umbral);
+    criterio = 'La remuneración bruta real iguala o supera el límite proporcional a la jornada.';
+  } else {
+    valorAfecto = roundExcel(tasa * exceso, 0);
+    bonoMensual = Math.max(0, aporteMax - valorAfecto);
+    criterio =
+      exceso === 0
+        ? 'Renta bruta real igual o inferior al umbral de jornada: corresponde el aporte máximo, luego se prorratea por días.'
+        : 'Tramo decreciente sobre el umbral de jornada: se descuenta el 71,437% del exceso y luego se prorratea por días.';
   }
 
-  const exceso = Math.max(0, renta - umbral);
-  const valorAfecto = roundExcel(tasa * exceso, 0);
-  const bono = Math.max(0, aporteMax - valorAfecto);
+  const bono = roundExcel(bonoMensual * factorDias, 0);
 
   return {
     ok: true,
@@ -199,16 +191,14 @@ function calcularBono(jornada, bruto, params) {
     aporteMax,
     exceso,
     valorAfecto,
+    bonoMensual,
     bono,
     costo: bono * meses,
     meses,
     dias,
     diasMes,
     renta,
-    criterio:
-      exceso === 0
-        ? 'Renta igual o inferior al umbral proporcional a jornada y días: corresponde el aporte máximo prorrateado.'
-        : 'Tramo decreciente sobre umbral proporcional a jornada y días: se descuenta el 71,437% del exceso.',
+    criterio,
   };
 }
 
@@ -217,13 +207,12 @@ function motivoNoCorresponde(calc) {
   if (calc.estado === 'SIN DIAS') return 'No registra días trabajados en el mes';
   if (!calc.ok || calc.estado === 'SIN JORNADA') return 'Sin jornada semanal válida';
   if (calc.renta >= calc.limite) {
-    const tramoDias =
-      calc.dias != null && calc.diasMes && calc.dias < calc.diasMes
-        ? ` de ${calc.dias}/${calc.diasMes} días`
-        : '';
-    return `La remuneración bruta (${clp(calc.renta)}) iguala o supera el límite proporcional${tramoDias} (${clp(calc.limite)})`;
+    return `La remuneración bruta (${clp(calc.renta)}) iguala o supera el límite proporcional a la jornada (${clp(calc.limite)})`;
   }
-  if (calc.bono <= 0) return 'El exceso sobre el umbral deja el bono en $0';
+  if ((Number(calc.bonoMensual) || 0) <= 0) return 'El exceso sobre el umbral deja el bono en $0';
+  if (calc.bono <= 0) {
+    return `El bono calculado (${clp(calc.bonoMensual)}) queda en $0 al prorratear ${calc.dias}/${calc.diasMes} días`;
+  }
   return calc.criterio || 'No corresponde bono';
 }
 
