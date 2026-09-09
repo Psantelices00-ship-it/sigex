@@ -1,7 +1,7 @@
 /**
  * Cálculo del bono mensual — Ley N° 21.806, Artículo 13.
- * Umbral, límite y aporte se prorratean solo por jornada/44 contra la renta bruta real.
- * El bono resultante se prorratea después por días trabajados/30.
+ * Para umbral y límite se usa la renta equivalente a 30 días: (bruto / días) × 30.
+ * El bono mensual resultante se prorratea después por días trabajados/30.
  */
 const PARAMETROS_2026 = {
   jornadaCompleta: 44,
@@ -134,6 +134,7 @@ function calcularBono(jornada, bruto, params) {
     dias,
     diasMes,
     renta,
+    rentaProyectada: 0,
   };
 
   if (dias <= 0) {
@@ -160,22 +161,26 @@ function calcularBono(jornada, bruto, params) {
   const aporteMax = roundExcel(aporteBase * factorJornada, 0);
   const factorDias = dias / diasMes;
   const factor = factorJornada;
+  const rentaProyectada = roundExcel((renta / dias) * diasMes, 0);
 
   let bonoMensual = 0;
-  let exceso = Math.max(0, renta - umbral);
+  let exceso = Math.max(0, rentaProyectada - umbral);
   let valorAfecto = 0;
   let criterio;
 
-  if (renta >= limite) {
-    exceso = Math.max(0, renta - umbral);
-    criterio = 'La remuneración bruta real iguala o supera el límite proporcional a la jornada.';
+  if (rentaProyectada >= limite) {
+    exceso = Math.max(0, rentaProyectada - umbral);
+    criterio =
+      'La renta equivalente a 30 días (' +
+      clp(rentaProyectada) +
+      ') iguala o supera el límite proporcional a la jornada.';
   } else {
     valorAfecto = roundExcel(tasa * exceso, 0);
     bonoMensual = Math.max(0, aporteMax - valorAfecto);
     criterio =
       exceso === 0
-        ? 'Renta bruta real igual o inferior al umbral de jornada: corresponde el aporte máximo, luego se prorratea por días.'
-        : 'Tramo decreciente sobre el umbral de jornada: se descuenta el 71,437% del exceso y luego se prorratea por días.';
+        ? 'La renta equivalente a 30 días es igual o inferior al umbral de jornada: corresponde el aporte máximo, luego se prorratea por días.'
+        : 'Tramo decreciente sobre el umbral de jornada, usando la renta equivalente a 30 días; luego se prorratea el bono por días.';
   }
 
   const bono = roundExcel(bonoMensual * factorDias, 0);
@@ -198,6 +203,7 @@ function calcularBono(jornada, bruto, params) {
     dias,
     diasMes,
     renta,
+    rentaProyectada,
     criterio,
   };
 }
@@ -206,8 +212,15 @@ function motivoNoCorresponde(calc) {
   if (!calc) return 'Sin cálculo';
   if (calc.estado === 'SIN DIAS') return 'No registra días trabajados en el mes';
   if (!calc.ok || calc.estado === 'SIN JORNADA') return 'Sin jornada semanal válida';
-  if (calc.renta >= calc.limite) {
-    return `La remuneración bruta (${clp(calc.renta)}) iguala o supera el límite proporcional a la jornada (${clp(calc.limite)})`;
+  if ((Number(calc.rentaProyectada) || Number(calc.renta) || 0) >= calc.limite) {
+    const equivalente = calc.rentaProyectada != null ? calc.rentaProyectada : calc.renta;
+    return (
+      'La renta equivalente a 30 días (' +
+      clp(equivalente) +
+      ') iguala o supera el límite proporcional a la jornada (' +
+      clp(calc.limite) +
+      ')'
+    );
   }
   if ((Number(calc.bonoMensual) || 0) <= 0) return 'El exceso sobre el umbral deja el bono en $0';
   if (calc.bono <= 0) {
