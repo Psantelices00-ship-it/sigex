@@ -1,7 +1,7 @@
 const router = require('express').Router();
 const db = require('../db');
 const auth = require('../middleware/auth');
-const { normalizeRutParts, formatearRut, rutMatchesQuery } = require('../lib/rutChileno');
+const { normalizeRutParts, formatearRut } = require('../lib/rutChileno');
 const { normalizeTipoFuncionario } = require('../lib/personalFuncionarioTipo');
 const {
   PERSONAL_DOC_TIPOS,
@@ -97,6 +97,8 @@ router.get('/funcionarios', auth, async (req, res) => {
     const q = String(req.query.q || '').trim();
     const tipo = String(req.query.tipo || '').trim();
     const estado = String(req.query.estado || '').trim();
+    const rutParts = q ? normalizeRutParts(q) : null;
+    const buscaPorRut = !!(rutParts || /^\d{5,}$/.test(q.replace(/\D/g, '')));
 
     let sql = `SELECT * FROM personal_funcionarios WHERE 1=1`;
     const params = [];
@@ -105,29 +107,41 @@ router.get('/funcionarios', auth, async (req, res) => {
       params.push(tipo);
       sql += ` AND tipo_funcionario = $${params.length}`;
     }
-    if (estado === 'activo' || estado === 'inactivo') {
-      params.push(estado);
-      sql += ` AND estado_laboral = $${params.length}`;
-    } else if (estado === 'todos') {
-      /* sin filtro */
-    } else {
-      sql += ` AND activo = TRUE`;
+
+    // Búsqueda por RUT: incluir activos e inactivos (como Carpetas), salvo filtro explícito.
+    const aplicarFiltroEstado = !(buscaPorRut && (estado === 'activo' || !estado || estado === ''));
+    if (aplicarFiltroEstado) {
+      if (estado === 'activo' || estado === 'inactivo') {
+        params.push(estado);
+        sql += ` AND estado_laboral = $${params.length}`;
+      } else if (estado === 'todos') {
+        /* sin filtro */
+      } else {
+        sql += ` AND activo = TRUE`;
+      }
+    }
+
+    if (q) {
+      if (rutParts) {
+        params.push(rutParts.rut_normalizado);
+        sql += ` AND rut_normalizado = $${params.length}`;
+      } else {
+        const digits = q.replace(/\D/g, '');
+        const qLower = q.toLowerCase();
+        if (digits.length >= 5) {
+          params.push(`${digits}%`);
+          params.push(`%${qLower}%`);
+          sql += ` AND (rut_numero LIKE $${params.length - 1} OR rut_normalizado LIKE $${params.length - 1} OR LOWER(nombre_completo) LIKE $${params.length})`;
+        } else {
+          params.push(`%${qLower}%`);
+          sql += ` AND LOWER(nombre_completo) LIKE $${params.length}`;
+        }
+      }
     }
 
     sql += ` ORDER BY nombre_completo ASC LIMIT 500`;
     const result = await db.query(sql, params);
-    let rows = result.rows;
-
-    if (q) {
-      const qLower = q.toLowerCase();
-      rows = rows.filter(
-        (r) =>
-          r.nombre_completo.toLowerCase().includes(qLower) ||
-          rutMatchesQuery(r.rut_numero, r.rut_normalizado, q)
-      );
-    }
-
-    res.json(rows.map((r) => publicFuncionario(r)));
+    res.json(result.rows.map((r) => publicFuncionario(r)));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
