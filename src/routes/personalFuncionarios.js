@@ -139,7 +139,8 @@ router.get('/funcionarios', auth, async (req, res) => {
       }
     }
 
-    sql += ` ORDER BY nombre_completo ASC LIMIT 500`;
+    // Nómina completa ~1700+; sin tope bajo la lista parece “no actualizada”.
+    sql += ` ORDER BY nombre_completo ASC LIMIT 5000`;
     const result = await db.query(sql, params);
     res.json(result.rows.map((r) => publicFuncionario(r)));
   } catch (err) {
