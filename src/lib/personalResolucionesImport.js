@@ -246,7 +246,7 @@ async function importarResolucionesNombramiento(opts) {
           buffer,
           originalname: item.archivo,
           cargado_por: usuarioLogin,
-          origen_carga: 'manual',
+          origen_carga: 'importacion_masiva',
         });
         resumen.documentos_cargados++;
       } catch (e) {

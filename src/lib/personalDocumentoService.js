@@ -48,7 +48,9 @@ async function guardarDocumentoPersonal({
   });
 
   let reemplazo = false;
-  if (!permiteMultiplesActivos(tipo_documental)) {
+  // Carga masiva: nunca sustituye un documento existente; agrega uno más.
+  const esImportacionMasiva = String(origen_carga || '') === 'importacion_masiva';
+  if (!esImportacionMasiva && !permiteMultiplesActivos(tipo_documental)) {
     const prev = await db.query(
       `SELECT id FROM personal_documentos WHERE funcionario_id = $1 AND tipo_documental = $2 AND es_activo = TRUE`,
       [funcionario.id, tipo_documental]
