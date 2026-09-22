@@ -49,15 +49,21 @@ async function guardarDocumentoPersonal({
 
   let reemplazo = false;
   // Carga masiva: nunca sustituye un documento existente; agrega uno más.
+  // Si el tipo es obligatorio (1 activo), la copia extra entra inactiva para no chocar el índice único.
   const esImportacionMasiva = String(origen_carga || '') === 'importacion_masiva';
-  if (!esImportacionMasiva && !permiteMultiplesActivos(tipo_documental)) {
+  let esActivo = true;
+  if (!permiteMultiplesActivos(tipo_documental)) {
     const prev = await db.query(
       `SELECT id FROM personal_documentos WHERE funcionario_id = $1 AND tipo_documental = $2 AND es_activo = TRUE`,
       [funcionario.id, tipo_documental]
     );
     if (prev.rows.length) {
-      reemplazo = true;
-      await db.query(`UPDATE personal_documentos SET es_activo = FALSE WHERE id = $1`, [prev.rows[0].id]);
+      if (esImportacionMasiva) {
+        esActivo = false;
+      } else {
+        reemplazo = true;
+        await db.query(`UPDATE personal_documentos SET es_activo = FALSE WHERE id = $1`, [prev.rows[0].id]);
+      }
     }
   }
 
@@ -73,12 +79,13 @@ async function guardarDocumentoPersonal({
     `INSERT INTO personal_documentos
       (funcionario_id, tipo_documental, version_num, es_activo, nombre_archivo, file_path, file_size,
        mime_type, cloudinary_public_id, fecha_vencimiento, estado, cargado_por, origen_carga)
-     VALUES ($1,$2,$3,TRUE,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
      RETURNING *`,
     [
       funcionario.id,
       tipo_documental,
       versionNum,
+      esActivo,
       nombreArchivo,
       uploaded.secure_url,
       buffer.length,

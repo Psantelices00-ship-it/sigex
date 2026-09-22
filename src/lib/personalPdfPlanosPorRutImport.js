@@ -18,19 +18,20 @@ function detectarTipoDocumental(filename) {
     .replace(/[\u0300-\u036f]/g, '');
 
   if (/RESOLUC|NOMBRAMIENTO/.test(u)) return 'resolucion_nombramiento';
+  if (/ANEXO/.test(u)) return 'anexo';
   if (/CONTRATO/.test(u) && !/TERMINO/.test(u)) return 'contrato';
   if (/TERMINO.?CONTRATO|FINIQUITO/.test(u)) return 'termino_contrato';
   if (/\bCV\b|CURRICUL/.test(u)) return 'curriculum';
   if (/CEDULA|IDENTIDAD/.test(u)) return 'cedula_identidad';
-  if (/ANTECEDENTE/.test(u)) return 'certificado_antecedentes';
+  if (/ANTECEDEN|ANTEDECEN/.test(u)) return 'certificado_antecedentes';
   if (/NACIMIENTO/.test(u)) return 'certificado_nacimiento';
   if (/INHABILIDAD|MENORES/.test(u)) return 'certificado_inhabilidad_menores';
   if (/SALUD|MEDICO/.test(u)) return 'certificado_salud';
   if (/\bAFP\b/.test(u)) return 'certificado_afp';
-  if (/ISAPRE|FONASA|PREVISION/.test(u)) return 'certificado_prevision';
+  if (/ISAPRE|FONASA|PREVISION|AFILIACION/.test(u)) return 'certificado_prevision';
   if (/MILITAR/.test(u)) return 'certificado_situacion_militar';
-  if (/ESTUDIO|TITULO|TÍTULO/.test(u)) return 'certificado_estudios';
-  if (/ANEXO/.test(u)) return 'anexo';
+  if (/ESTUDIO|TITULO/.test(u)) return 'certificado_estudios';
+  // Propuestas, órdenes, certificados presupuestarios, etc. → consolidado (no sustituye)
   return TIPO_CONSOLIDADO_IMPORT;
 }
 
@@ -109,14 +110,17 @@ async function buscarFuncionarioPorRut(parts) {
   return { funcionario: null, ambiguo: false };
 }
 
-async function yaExisteArchivo(funcionarioId, tipoDocumental, nombreArchivo) {
-  const r = await db.query(
-    `SELECT id FROM personal_documentos
+async function yaExisteArchivo(funcionarioId, tipoDocumental, nombreArchivo, antesDe = null) {
+  const params = [funcionarioId, tipoDocumental, nombreArchivo];
+  let sql = `SELECT id, created_at FROM personal_documentos
      WHERE funcionario_id = $1 AND tipo_documental = $2
-       AND lower(nombre_archivo) = lower($3)
-     LIMIT 1`,
-    [funcionarioId, tipoDocumental, nombreArchivo]
-  );
+       AND lower(nombre_archivo) = lower($3)`;
+  if (antesDe) {
+    params.push(antesDe);
+    sql += ` AND created_at < $${params.length}::timestamp`;
+  }
+  sql += ' LIMIT 1';
+  const r = await db.query(sql, params);
   return r.rows.length > 0;
 }
 
@@ -127,6 +131,10 @@ async function yaExisteArchivo(funcionarioId, tipoDocumental, nombreArchivo) {
  * @param {string} opts.usuarioLogin
  * @param {boolean} [opts.dryRun]
  * @param {boolean} [opts.forzar]
+ * @param {boolean} [opts.omitidosComoConsolidado] Si true: solo archivos que ya existían
+ *   (los que se omitirían) se cargan otra vez como consolidado_antiguo.
+ * @param {string} [opts.omitidosAntesDe] Timestamp (YYYY-MM-DD HH:MM:SS) — solo cuenta
+ *   como “ya existía” si el doc previo es anterior a este instante (evita re-copiar el mismo lote).
  * @param {(p: object) => Promise<void>} [opts.onProgress]
  */
 async function importarPdfPlanosPorRut(opts) {
@@ -137,6 +145,8 @@ async function importarPdfPlanosPorRut(opts) {
 
   const dryRun = !!opts.dryRun;
   const forzar = !!opts.forzar;
+  const omitidosComoConsolidado = !!opts.omitidosComoConsolidado;
+  const omitidosAntesDe = opts.omitidosAntesDe ? String(opts.omitidosAntesDe).trim() : null;
   const usuarioLogin = opts.usuarioLogin || 'script_pdf_planos';
   const onProgress = opts.onProgress || (async () => {});
   const inicio = Date.now();
@@ -144,6 +154,8 @@ async function importarPdfPlanosPorRut(opts) {
   const resumen = {
     base_path: basePath,
     dry_run: dryRun,
+    omitidos_como_consolidado: omitidosComoConsolidado,
+    omitidos_antes_de: omitidosAntesDe,
     archivos_total: 0,
     archivos_sin_rut: 0,
     documentos_cargados: 0,
@@ -188,12 +200,14 @@ async function importarPdfPlanosPorRut(opts) {
     }
     if (!funcionario) {
       resumen.funcionarios_no_encontrados++;
-      resumen.incidencias.push({
-        archivo,
-        rut: parsed.rut_display,
-        tipo: 'funcionario_no_encontrado',
-        mensaje: 'Funcionario no está en la base SIGEX',
-      });
+      if (!omitidosComoConsolidado) {
+        resumen.incidencias.push({
+          archivo,
+          rut: parsed.rut_display,
+          tipo: 'funcionario_no_encontrado',
+          mensaje: 'Funcionario no está en la base SIGEX',
+        });
+      }
       continue;
     }
 
@@ -204,17 +218,36 @@ async function importarPdfPlanosPorRut(opts) {
 
     let tipo = parsed.tipo_documental;
     if (!tipoPermitidoParaFuncionario(tipo, funcionario.tipo_funcionario)) {
-      // Fallback seguro: no bloquear la carga
       tipo = TIPO_CONSOLIDADO_IMPORT;
     }
 
-    resumen.por_tipo[tipo] = (resumen.por_tipo[tipo] || 0) + 1;
-
     try {
-      if (!forzar && !dryRun && (await yaExisteArchivo(funcionario.id, tipo, archivo))) {
-        resumen.documentos_omitidos++;
-        continue;
+      if (omitidosComoConsolidado) {
+        // Solo los que ya estaban ANTES del lote ESCANEO (omitidos originales)
+        const yaExistePrevio = await yaExisteArchivo(
+          funcionario.id,
+          tipo,
+          archivo,
+          omitidosAntesDe
+        );
+        if (!yaExistePrevio) {
+          resumen.documentos_omitidos++;
+          continue;
+        }
+        tipo = TIPO_CONSOLIDADO_IMPORT;
+        if (!forzar && (await yaExisteArchivo(funcionario.id, tipo, archivo))) {
+          resumen.documentos_omitidos++;
+          continue;
+        }
+      } else {
+        const yaExisteTipo = await yaExisteArchivo(funcionario.id, tipo, archivo);
+        if (!forzar && !dryRun && yaExisteTipo) {
+          resumen.documentos_omitidos++;
+          continue;
+        }
       }
+
+      resumen.por_tipo[tipo] = (resumen.por_tipo[tipo] || 0) + 1;
 
       if (dryRun) {
         resumen.documentos_cargados++;

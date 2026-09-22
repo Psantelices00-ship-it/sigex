@@ -110,6 +110,13 @@ router.post('/funcionarios/:funcionarioId/documentos', auth, upload.single('arch
     }
     if (!req.file?.buffer) return res.status(400).json({ error: 'Debe adjuntar un archivo PDF' });
 
+    if (tipo === 'anexo') {
+      const nom = String(req.body?.nombre_archivo || req.body?.nombre || '').trim();
+      if (!nom) {
+        return res.status(400).json({ error: 'Indicá el nombre del anexo' });
+      }
+    }
+
     const pdfErr = validatePersonalPdf(req.file.buffer, req.file.originalname, req.file.mimetype);
     if (pdfErr) return res.status(400).json({ error: pdfErr });
 
@@ -146,6 +153,17 @@ router.post('/funcionarios/:funcionarioId/documentos', auth, upload.single('arch
     const versionNum = (verRow.rows[0]?.mx || 0) + 1;
     const estado = fechaVenc ? calcularEstadoDocumento(fechaVenc) : 'vigente';
 
+    let nombreArchivo = String(req.body?.nombre_archivo || req.body?.nombre || '').trim();
+    if (nombreArchivo) {
+      if (!/\.pdf$/i.test(nombreArchivo)) nombreArchivo = `${nombreArchivo}.pdf`;
+      // Evitar path tricks / nombres vacíos tras sanitizar
+      nombreArchivo = nombreArchivo.replace(/[\\/]/g, ' ').replace(/\s+/g, ' ').trim();
+      if (nombreArchivo.length > 200) nombreArchivo = nombreArchivo.slice(0, 200);
+    }
+    if (!nombreArchivo) {
+      nombreArchivo = req.file.originalname || fname;
+    }
+
     const result = await db.query(
       `INSERT INTO personal_documentos
         (funcionario_id, tipo_documental, version_num, es_activo, nombre_archivo, file_path, file_size,
@@ -156,7 +174,7 @@ router.post('/funcionarios/:funcionarioId/documentos', auth, upload.single('arch
         funcionario.id,
         tipo,
         versionNum,
-        req.file.originalname || fname,
+        nombreArchivo,
         uploaded.secure_url,
         req.file.size,
         'application/pdf',
