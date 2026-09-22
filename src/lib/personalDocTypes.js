@@ -32,7 +32,7 @@ const PERSONAL_DOC_TIPOS_ANEXOS = [
 const PERSONAL_DOC_TIPOS_IMPORTACION = [
   {
     key: 'consolidado_antiguo',
-    label: 'Consolidado antiguo (importación masiva)',
+    label: 'Otros documentos',
     requiere_vencimiento: false,
     solo_hombres: false,
     multiples_activos: true,
