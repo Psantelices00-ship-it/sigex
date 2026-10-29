@@ -308,7 +308,13 @@ router.post('/licencias/maestro', auth, upload.single('archivo'), async (req, re
 
     const parsed = parseMaestroRemuneracionesExcel(req.file.buffer);
     if (!parsed.rows.length) {
-      return res.status(400).json({ error: 'El Excel no tiene filas válidas' });
+      return res.status(400).json({
+        error:
+          'El Excel no tiene filas válidas (revisá AFP/salud: deben coincidir con catálogo; no se acepta RUT en esas columnas)',
+        errores: parsed.errores?.slice(0, 50) || [],
+        total_errores: parsed.errores?.length || 0,
+        advertencias: parsed.advertencias?.slice(0, 20) || [],
+      });
     }
 
     const { importarMaestro } = require('../lib/personalMaestroRemuneracionesImport');
