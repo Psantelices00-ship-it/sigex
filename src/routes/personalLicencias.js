@@ -3,7 +3,11 @@ const multer = require('multer');
 const db = require('../db');
 const auth = require('../middleware/auth');
 const { normalizeRutParts, formatearRut } = require('../lib/rutChileno');
-const { requireAccesoPersonal, requireGestionPersonal } = require('../lib/personalPermisos');
+const {
+  requireAccesoPersonal,
+  requireGestionPersonal,
+  requireCargarDatosLicencias,
+} = require('../lib/personalPermisos');
 const { registrarAuditoriaPersonal } = require('../lib/personalAuditoria');
 const { etiquetaPeriodo } = require('../lib/personalLiquidacionParse');
 const { parseMaestroRemuneracionesExcel } = require('../lib/personalMaestroRemuneracionesParse');
@@ -295,7 +299,7 @@ router.get('/licencias/maestro/periodos', auth, async (req, res) => {
 /** POST /licencias/maestro — importar Excel mensual */
 router.post('/licencias/maestro', auth, upload.single('archivo'), async (req, res) => {
   try {
-    if (!requireGestionPersonal(req, res)) return;
+    if (!requireCargarDatosLicencias(req, res)) return;
     if (!req.file?.buffer?.length) {
       return res.status(400).json({ error: 'Adjuntá el maestro de remuneraciones (Excel)' });
     }
@@ -416,7 +420,7 @@ router.get('/licencias/historial/estado', auth, async (req, res) => {
 /** POST /licencias/historial/carga-masiva — importar historial desde Excel */
 router.post('/licencias/historial/carga-masiva', auth, uploadHistorial.single('archivo'), async (req, res) => {
   try {
-    if (!requireGestionPersonal(req, res)) return;
+    if (!requireCargarDatosLicencias(req, res)) return;
     if (!req.file?.buffer?.length) {
       return res.status(400).json({ error: 'Adjuntá el Excel de licencias médicas' });
     }
