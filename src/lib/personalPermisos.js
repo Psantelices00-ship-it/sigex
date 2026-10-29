@@ -7,14 +7,16 @@ const ROLES_ACCESO_PERSONAL = [
   'Recursos Humanos',
   'Jefe de Contabilidad',
   'Contabilidad',
-  ROL_ROBOT_LME, // consulta LME + carga de maestro/historial
+  ROL_ROBOT_LME, // mismo acceso Personal que RH, con atribución LME
 ];
 
+/** Igual que RH: puede cargar/editar en Personal. El robot además usa el panel LME. */
 const ROLES_GESTION_PERSONAL = [
   'Super Admin',
   'Administrador',
   'Secretaria de Administración',
   'Recursos Humanos',
+  ROL_ROBOT_LME,
 ];
 
 function esRolRobotLme(user) {
@@ -29,9 +31,9 @@ function puedeGestionarPersonal(user) {
   return ROLES_GESTION_PERSONAL.includes(String(user?.rol || '').trim());
 }
 
-/** Maestro e historial de licencias: gestión RH/admin o el usuario Robot LME. */
+/** Alias: Robot LME ya está en ROLES_GESTION_PERSONAL. */
 function puedeCargarDatosLicencias(user) {
-  return puedeGestionarPersonal(user) || esRolRobotLme(user);
+  return puedeGestionarPersonal(user);
 }
 
 function requireAccesoPersonal(req, res) {
@@ -51,11 +53,7 @@ function requireGestionPersonal(req, res) {
 }
 
 function requireCargarDatosLicencias(req, res) {
-  if (!puedeCargarDatosLicencias(req.user)) {
-    res.status(403).json({ error: 'Sin permisos para cargar maestro o historial de licencias' });
-    return false;
-  }
-  return true;
+  return requireGestionPersonal(req, res);
 }
 
 module.exports = {
