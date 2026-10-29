@@ -1,3 +1,8 @@
 node_modules
 .env
 uploads/
+
+tmp/
+main
+.DS_Store
+**/.DS_Store
