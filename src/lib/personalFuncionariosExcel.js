@@ -22,6 +22,24 @@ function parseDateCell(v) {
   return null;
 }
 
+function cell(row, ...keys) {
+  for (const k of keys) {
+    if (row[k] != null && String(row[k]).trim() !== '') return row[k];
+  }
+  // Tolerar encabezados con encoding roto (ej. Ubicaci?n / UbicaciÃ³n)
+  const norm = (s) =>
+    String(s || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '');
+  const wanted = keys.map(norm);
+  for (const [k, v] of Object.entries(row || {})) {
+    if (wanted.includes(norm(k)) && v != null && String(v).trim() !== '') return v;
+  }
+  return '';
+}
+
 /**
  * @param {Buffer} buffer
  * @returns {{ rows: object[], errores: object[] }}
@@ -32,22 +50,34 @@ function parseFuncionariosExcel(buffer) {
   const raw = XLSX.utils.sheet_to_json(sheet, { defval: '' });
   const rows = [];
   const errores = [];
+  const seen = new Set();
 
   raw.forEach((row, idx) => {
     const linea = idx + 2;
-    const rutRaw = row.rut ?? row.RUT ?? row.Rut ?? '';
+    const rutRaw = cell(row, 'rut', 'RUT', 'Rut');
     const parts = normalizeRutParts(rutRaw);
     if (!parts) {
       errores.push({ linea, rut: String(rutRaw), error: 'RUT inválido' });
       return;
     }
-    const nombre = String(row.nombre ?? row.NOMBRE ?? '').trim();
+    if (seen.has(parts.rut_normalizado)) {
+      // Duplicado en el Excel: se conserva la primera aparición
+      return;
+    }
+    seen.add(parts.rut_normalizado);
+
+    const nombre = String(cell(row, 'nombre', 'NOMBRE', 'Nombre')).trim();
     if (!nombre) {
       errores.push({ linea, rut: formatearRut(parts.rut_normalizado), error: 'Nombre vacío' });
       return;
     }
-    const tipoRaw = row.TIPO ?? row.tipo ?? row.Tipo ?? '';
-    const tipo = normalizeTipoFuncionario(tipoRaw) || 'asistente';
+    const tipoRaw = cell(row, 'TIPO', 'tipo', 'Tipo', 'planta', 'Planta');
+    let tipo = normalizeTipoFuncionario(tipoRaw);
+    if (!tipo) {
+      const cat = String(cell(row, 'Categoria', 'categoria', 'CATEGORIA')).trim().toUpperCase();
+      if (cat === 'D') tipo = 'docente';
+    }
+    if (!tipo) tipo = 'asistente';
 
     rows.push({
       rut_normalizado: parts.rut_normalizado,
@@ -55,12 +85,12 @@ function parseFuncionariosExcel(buffer) {
       rut_dv: parts.rut_dv,
       nombre_completo: nombre,
       tipo_funcionario: tipo,
-      planta: String(row.planta ?? row.Planta ?? '').trim() || null,
-      ubicacion: String(row.Ubicación ?? row.Ubicacion ?? row.ubicacion ?? '').trim() || null,
-      fecha_ingreso: parseDateCell(row.fechaing ?? row.FECHAING ?? row.fecha_ingreso),
-      fecha_nacimiento: parseDateCell(row.FECHA_NACIMIENTO ?? row.fecha_nacimiento),
-      profesion: String(row.profesion ?? row.PROFESION ?? '').trim() || null,
-      tipo_contrato: String(row.Tipo_de_Contrato ?? row.tipo_contrato ?? '').trim() || null,
+      planta: String(cell(row, 'planta', 'Planta')).trim() || null,
+      ubicacion: String(cell(row, 'Ubicación', 'Ubicacion', 'ubicacion', 'Ubicaci?n')).trim() || null,
+      fecha_ingreso: parseDateCell(cell(row, 'fechaing', 'FECHAING', 'fecha_ingreso')),
+      fecha_nacimiento: parseDateCell(cell(row, 'FECHA_NACIMIENTO', 'fecha_nacimiento')),
+      profesion: String(cell(row, 'profesion', 'PROFESION', 'Cargo_Especifico')).trim() || null,
+      tipo_contrato: String(cell(row, 'Tipo_de_Contrato', 'tipo_contrato')).trim() || null,
       linea,
     });
   });
