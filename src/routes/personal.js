@@ -22,6 +22,8 @@ router.use(personalImportaciones)
 router.use(personalFuncionarios)
 router.use(personalLiquidaciones)
 router.use(personalLicencias)
+router.use(require('./personalLmePaquete')) // Paquete LME (solo lectura)
+router.use(require('./personalLmeRobot')) // Robot LME: interruptor y registro (admin + usuario robot)
 router.use(personalCarpetas)
 
 const upload = multer({

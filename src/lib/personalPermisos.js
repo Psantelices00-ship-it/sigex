@@ -5,6 +5,7 @@ const ROLES_ACCESO_PERSONAL = [
   'Recursos Humanos',
   'Jefe de Contabilidad',
   'Contabilidad',
+  'Robot LME', // solo lectura: datos LME y liquidaciones (usuario del robot)
 ];
 
 const ROLES_GESTION_PERSONAL = [
