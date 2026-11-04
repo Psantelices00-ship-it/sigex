@@ -5,9 +5,18 @@ const {
   isTipoObligatorio,
   tiposObligatoriosParaFuncionario,
   tipoDocumentalLabel,
+  PERSONAL_DOC_TIPOS_OBLIGATORIOS,
 } = require('./personalDocTypes');
 const { extractSinglePagePdf } = require('./personalLiquidacionExport');
 const { etiquetaPeriodo } = require('./personalLiquidacionParse');
+const { buildMergedPdf } = require('./consolidarPdfLib');
+
+/** Orden de fusión en el PDF único de la carpeta documental. */
+const MERGE_ORDER_DOCS = [
+  ...PERSONAL_DOC_TIPOS_OBLIGATORIOS.map((t) => t.key),
+  'anexo',
+  'consolidado_antiguo',
+];
 
 function sanitizeFilename(name) {
   return String(name || 'archivo')
@@ -288,6 +297,25 @@ async function createZipArchive() {
 }
 
 /**
+ * Une todos los PDFs documentales de la ficha en un solo buffer.
+ * Liquidaciones no entran aquí (siguen por mes en el ZIP).
+ */
+async function consolidarDocumentosCarpetaPdf(documentos) {
+  const rows = (documentos || [])
+    .filter((d) => d?.file_path && String(d.file_path).trim())
+    .map((d) => ({
+      tipo: d.tipo_documental,
+      nombre: d.nombre_archivo || tipoDocumentalLabel(d.tipo_documental) || d.tipo_documental,
+      file_path: d.file_path,
+      mime_type: d.mime_type || 'application/pdf',
+      formato: 'pdf',
+      created_at: d.created_at,
+    }));
+  if (!rows.length) return null;
+  return buildMergedPdf(rows, MERGE_ORDER_DOCS);
+}
+
+/**
  * @param {import('archiver').Archiver} archive
  * @param {object} opts
  */
@@ -295,25 +323,34 @@ async function appendCarpetaToArchive(archive, opts) {
   const { funcionario, documentos, liquidaciones, resumenJson, basePrefix = '' } = opts;
   const root = basePrefix ? `${String(basePrefix).replace(/\/$/, '')}/` : '';
 
-  archive.append(JSON.stringify(resumenJson, null, 2), {
+  const docsConUrl = (documentos || []).filter((d) => d?.file_path && String(d.file_path).trim());
+  const meta = {
+    ...(resumenJson || {}),
+    documentos_en_pdf_unico: true,
+    documentos_individuales_en_zip: false,
+    documentos_incluidos_en_pdf: docsConUrl.length,
+  };
+
+  archive.append(JSON.stringify(meta, null, 2), {
     name: `${root}resumen/resumen_funcionario.json`,
   });
 
-  for (const doc of documentos) {
-    if (!doc.file_path) continue;
-    let folder = 'documentos';
-    if (doc.tipo_documental === 'consolidado_antiguo') folder = 'consolidados_antiguos';
-    else if (doc.tipo_documental === 'anexo') folder = 'anexos';
-    else folder = `documentos/${doc.tipo_documental}`;
-
+  if (docsConUrl.length) {
     try {
-      const buf = await fetchFileBuffer(doc.file_path);
-      const fname = sanitizeFilename(doc.nombre_archivo || `${doc.tipo_documental}.pdf`);
-      archive.append(buf, { name: `${root}${folder}/${fname}` });
-    } catch {
+      const merged = await consolidarDocumentosCarpetaPdf(docsConUrl);
+      if (merged?.length) {
+        const rutCode = rutNumeroSinFormato(funcionario);
+        const fname = sanitizeFilename(`${rutCode}_documentos_consolidados.pdf`);
+        archive.append(merged, { name: `${root}${fname}` });
+      }
+    } catch (e) {
       archive.append(
-        JSON.stringify({ error: 'No se pudo descargar', doc_id: doc.id, tipo: doc.tipo_documental }),
-        { name: `${root}${folder}/ERROR_${doc.id}.json` }
+        JSON.stringify({
+          error: 'No se pudo consolidar la documentación en un solo PDF',
+          mensaje: e.message || String(e),
+          documentos_intentados: docsConUrl.length,
+        }),
+        { name: `${root}resumen/ERROR_documentos_consolidados.json` }
       );
     }
   }
@@ -469,4 +506,5 @@ module.exports = {
   liquidacionesRowsForFuncionario,
   docsResumenForFuncionario,
   carpetaZipBaseName,
+  consolidarDocumentosCarpetaPdf,
 };
