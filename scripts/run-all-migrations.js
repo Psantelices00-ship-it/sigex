@@ -1,8 +1,16 @@
 /**
- * Ejecuta todas las migraciones en orden (local/Railway vía DATABASE_URL).
+ * Ejecuta todas las migraciones en orden (local vía DATABASE_URL).
  * Uso: node scripts/run-all-migrations.js
+ *
+ * En Railway (release) NO re-ejecutar: ya están aplicadas y un ECONNRESET
+ * deja el deploy en FAILED y tumba el servicio.
  */
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+
+if (process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_SERVICE_ID) {
+  console.log('SIGEX: migraciones omitidas en Railway (ya aplicadas). Usá run-all-migrations.js en local.');
+  process.exit(0);
+}
 
 const dbUrl = process.env.DATABASE_URL || '';
 if (dbUrl.includes('railway') && process.env.DATABASE_SSL !== 'false') {
