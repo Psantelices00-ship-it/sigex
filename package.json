@@ -5,7 +5,8 @@
   "type": "commonjs",
   "scripts": {
     "dev": "nodemon src/index.js",
-    "start": "node src/index.js",
+    "start": "node scripts/ensure-tessdata.js && node src/index.js",
+    "tessdata": "node scripts/ensure-tessdata.js",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
     "db:init": "docker exec -i sigex-api-postgres psql -U postgres -d sigex < src/models/schema.sql",

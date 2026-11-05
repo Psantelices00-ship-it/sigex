@@ -1,6 +1,12 @@
 /**
- * Extrae campos de un decreto/resolución de nombramiento desde texto (pdf-parse u OCR).
- * Prioridad del N°: nombre de archivo → RESOLUCIÓN FINAL / DECRETO DAEM → nunca el VISTOS.
+ * Extracción fidedigna de decretos/resoluciones de nombramiento.
+ *
+ * Estrategia:
+ * 1) Plantilla DECRETO DAEM (formulario municipal etiquetado)
+ * 2) Plantilla RESOLUCIÓN FINAL (Administrador Provisional)
+ * 3) Heurísticas de respaldo
+ *
+ * Nunca tomar N° del VISTOS (Resolución Exenta de la Superintendencia).
  */
 
 const MESES = {
@@ -19,26 +25,30 @@ const MESES = {
   DICIEMBRE: '12',
 }
 
-/** Versión de parser: si sube, se invalida extraccion_json antigua. */
-const PARSER_VERSION = 2
+/** Subir para invalidar extraccion_json en caché. */
+const PARSER_VERSION = 3
 
-function ymd(v) {
-  if (!v) return null
-  if (v instanceof Date && !Number.isNaN(v.getTime())) return v.toISOString().slice(0, 10)
-  const s = String(v).trim()
-  let m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/)
-  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10)
-  return null
+function normMes(m) {
+  return String(m || '')
+    .toUpperCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
 }
 
 function fechaLarga(dia, mesNombre, anio) {
-  const mm = MESES[String(mesNombre || '').toUpperCase().normalize('NFD').replace(/\p{M}/gu, '')]
+  const mm = MESES[normMes(mesNombre)]
   if (!mm || !anio) return null
-  return `${anio}-${mm}-${String(dia).padStart(2, '0')}`
+  const d = String(dia).padStart(2, '0')
+  return `${anio}-${mm}-${d}`
 }
 
-function normalizarOcr(text) {
+function ymdSlash(v) {
+  const m = String(v || '').trim().match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/)
+  if (!m) return null
+  return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`
+}
+
+function normalizarTexto(text) {
   return String(text || '')
     .replace(/\u00a0/g, ' ')
     .replace(/[|¦]/g, ' ')
@@ -46,8 +56,16 @@ function normalizarOcr(text) {
     .replace(/\bNP\b/gi, 'N°')
     .replace(/\bNF\b/gi, 'N°')
     .replace(/\bNº\b/gi, 'N°')
-    .replace(/\s+/g, ' ')
+    .replace(/\bFIIANZA\b/gi, 'FIANZA')
+    .replace(/\bPRPOF\b/gi, 'PROF')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+/** Texto en una sola línea (útil para formularios en 2 columnas). */
+function unaLinea(text) {
+  return normalizarTexto(text).replace(/\s*\n\s*/g, ' ')
 }
 
 function nDesdeNombreArchivo(archivo) {
@@ -59,24 +77,23 @@ function nDesdeNombreArchivo(archivo) {
   return null
 }
 
-function parseFechaLargaEnTexto(text) {
-  const m = String(text || '').match(
-    /(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+(\d{4})/i
-  )
-  if (!m) return null
-  return fechaLarga(m[1], m[2], m[3])
+function todasFechasLargas(text) {
+  const re =
+    /(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+(\d{4})/gi
+  const out = []
+  let m
+  while ((m = re.exec(text))) {
+    out.push({
+      iso: fechaLarga(m[1], m[2], m[3]),
+      index: m.index,
+      raw: m[0],
+    })
+  }
+  return out.filter((x) => x.iso)
 }
 
-/**
- * @param {string} text
- * @param {string} [archivo]
- */
-function parseActoFromText(text, archivo) {
-  const raw = String(text || '')
-  const t = normalizarOcr(raw)
-  const u = t.toUpperCase()
-
-  const out = {
+function vacio() {
+  return {
     n_decreto: null,
     tipo_acto: null,
     fecha_decreto: null,
@@ -85,21 +102,249 @@ function parseActoFromText(text, archivo) {
     fecha_termino_texto: null,
     horas: null,
     establecimiento: null,
-    extracto: t.slice(0, 500),
+    plantilla: null,
+    confianza: 0,
+    extracto: '',
     parser_version: PARSER_VERSION,
   }
+}
+
+/**
+ * Formulario DAEM: etiquetas a la izquierda, valores con ":" (a veces linealizados).
+ * Ejemplo real: FECHA DE INICIO … : 01 DE MARZO DE 2025 : 28 DE FEBRERO DE 2026
+ */
+function parsePlantillaDaem(text, archivo) {
+  const raw = normalizarTexto(text)
+  const line = unaLinea(text)
+  const U = line.toUpperCase()
+  if (!/DECRETO\s+DAEM|DESIGNA\s+PERSONAL\s+DOCENTE|FECHA\s+DE\s+INICIO/i.test(U)) {
+    return null
+  }
+
+  const out = vacio()
+  out.plantilla = 'daem'
+  out.tipo_acto = 'Decreto'
+  out.extracto = line.slice(0, 500)
+
+  // N°: DECRETO DAEM N° 522 (o OCR ruidoso)
+  const n =
+    U.match(/\bDECRETO\s+DAEM\s*N[°ºO.]?\s*0*([0-9]{1,6})\b/) ||
+    U.match(/\bDECRETO\s+DAEM\b[^0-9]{0,30}?0*([0-9]{3,6})\b/) ||
+    U.match(/\bDECRETO\s+ALCALDICIO\s*N[°ºO.]?\s*0*([0-9]{1,6})\b/)
+  if (n) out.n_decreto = String(parseInt(n[1], 10))
+  else if (nDesdeNombreArchivo(archivo)) out.n_decreto = nDesdeNombreArchivo(archivo)
+
+  // Fecha decreto: TALCAHUANO, 03 DE MARZO DE 2025
+  const fd = U.match(
+    /TALCAHUANO[,\s]+(?:A\s+)?(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+(\d{4})/i
+  )
+  if (fd) out.fecha_decreto = fechaLarga(fd[1], fd[2], fd[3])
+
+  // Valores tras ":" en orden típico del formulario (después del bloque DECRETO:)
+  const bloqueMatch = line.match(/DECRETO\s*:?\s*(?:DESIGNACI[OÓ]N|DESIGNASE|DES[IÍ]GNASE)?([\s\S]{20,1200}?)(?:ANOTESE|AN[OÓ]TESE|COMUNIQUESE|DISTRIBUC)/i)
+  const bloque = bloqueMatch ? bloqueMatch[1] : line
+  const valores = [...bloque.matchAll(/:\s*([^:]{2,120}?)(?=\s*:|$)/g)].map((m) => m[1].replace(/\s+/g, ' ').trim())
+
+  // Buscar jornada / establecimiento / fechas en la lista de valores
+  for (const v of valores) {
+    const vu = v.toUpperCase()
+    if (!out.horas) {
+      const hm = vu.match(/^(\d{1,2})\s*HORAS?\b/)
+      if (hm) {
+        const nH = Number(hm[1])
+        if (nH >= 1 && nH <= 44) out.horas = nH
+      }
+    }
+    if (!out.establecimiento && /\bF-?\d{2,4}\b/i.test(v)) {
+      out.establecimiento = v.replace(/\s+/g, ' ').trim().slice(0, 100)
+    }
+    if (!out.fecha_inicio) {
+      const fm = v.match(
+        /^(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+(\d{4})$/i
+      )
+      if (fm) out.fecha_inicio = fechaLarga(fm[1], fm[2], fm[3])
+      else if (ymdSlash(v)) out.fecha_inicio = ymdSlash(v)
+    } else if (!out.fecha_termino) {
+      const fm = v.match(
+        /^(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+(\d{4})$/i
+      )
+      if (fm) out.fecha_termino = fechaLarga(fm[1], fm[2], fm[3])
+      else if (ymdSlash(v)) out.fecha_termino = ymdSlash(v)
+      else if (/TERMINO\s+DE\s+LICENCIA|HASTA\s+EL\s+TERMINO|FIN\s+DE\s+LICENCIA/i.test(v)) {
+        out.fecha_termino_texto = v.slice(0, 80)
+      }
+    }
+  }
+
+  // Etiquetas en la misma línea (OCR limpio): FECHA DE INICIO : 07/03/2023
+  if (!out.fecha_inicio) {
+    const iniSlash = line.match(/FECHA\s+DE\s+INICIO\s*[:.]?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})/i)
+    if (iniSlash) out.fecha_inicio = ymdSlash(iniSlash[1])
+  }
+  if (!out.fecha_inicio) {
+    const iniLarga = line.match(
+      /FECHA\s+DE\s+INICIO\s*[:.]?\s*(\d{1,2}\s+DE\s+(?:ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+\d{4})/i
+    )
+    if (iniLarga) {
+      const fm = iniLarga[1].match(
+        /(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+(\d{4})/i
+      )
+      if (fm) out.fecha_inicio = fechaLarga(fm[1], fm[2], fm[3])
+    }
+  }
+
+  if (!out.fecha_termino) {
+    const terSlash = line.match(/FECHA\s+DE\s+T[EÉ]RMINO\s*[:.]?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})/i)
+    if (terSlash) out.fecha_termino = ymdSlash(terSlash[1])
+  }
+  if (!out.fecha_termino) {
+    const terLarga = line.match(
+      /FECHA\s+DE\s+T[EÉ]RMINO\s*[:.]?\s*(\d{1,2}\s+DE\s+(?:ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+\d{4})/i
+    )
+    if (terLarga) {
+      const fm = terLarga[1].match(
+        /(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+(\d{4})/i
+      )
+      if (fm) out.fecha_termino = fechaLarga(fm[1], fm[2], fm[3])
+    }
+  }
+
+  // Respaldo: fechas largas después de la etiqueta
+  if (!out.fecha_inicio || !out.fecha_termino) {
+    const fechas = todasFechasLargas(U)
+    const idxIni = U.search(/FECHA\s+DE\s+INICIO/i)
+    const candidatas = idxIni >= 0 ? fechas.filter((f) => f.index > idxIni - 20) : fechas.slice(1)
+    if (!out.fecha_inicio && candidatas[0]) out.fecha_inicio = candidatas[0].iso
+    if (!out.fecha_termino && candidatas[1]) out.fecha_termino = candidatas[1].iso
+  }
+
+  // Término textual (licencia, etc.)
+  if (!out.fecha_termino) {
+    const ter = line.match(
+      /FECHA\s+DE\s+T[EÉ]RMINO\s*[:.]?\s*(TERMINO\s+DE\s+LICENCIA(?:\s+MEDICA)?)/i
+    )
+    if (ter) out.fecha_termino_texto = ter[1].replace(/\s+/g, ' ').trim().slice(0, 80)
+  }
+
+  // Sanidad de fechas (evitar basura OCR de consolidados)
+  const añoOk = (iso) => {
+    if (!iso) return true
+    const y = Number(String(iso).slice(0, 4))
+    return y >= 2015 && y <= 2035
+  }
+  if (!añoOk(out.fecha_inicio)) out.fecha_inicio = null
+  if (!añoOk(out.fecha_termino)) out.fecha_termino = null
+  if (!añoOk(out.fecha_decreto)) out.fecha_decreto = null
+
+  if (!out.horas) {
+    const hm = U.match(/JORNADA[^0-9]{0,20}(\d{1,2})\s*HORAS?/i) || U.match(/:\s*(\d{1,2})\s*HORAS?\b/i)
+    if (hm) {
+      const nH = Number(hm[1])
+      if (nH >= 1 && nH <= 44) out.horas = nH
+    }
+  }
+
+  if (!out.establecimiento) {
+    const em = line.match(
+      /ESTAB(?:\.|LECIMIENTO)?\s*(?:EDUCACIONAL)?\s*[:.]?\s*(F-?\d{2,4}\s+[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s.\-]{2,40})/i
+    ) || U.match(/\b(F-?\d{2,4}\s+[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s.\-]{2,40})\b/i)
+    if (em) {
+      out.establecimiento = em[1]
+        .replace(/\s+/g, ' ')
+        .split(/\s+RAZ[OÓ]N|\s+NEC\.|\s+FECHA|\s+FIANZA|\s+JORNADA/i)[0]
+        .trim()
+        .slice(0, 100)
+    }
+  }
+  if (out.establecimiento) {
+    out.establecimiento = out.establecimiento
+      .split(/\s+RAZ[OÓ]N|\s+NEC\.|\s+FECHA|\s+FIANZA/i)[0]
+      .trim()
+  }
+
+  // Confianza
+  let c = 0
+  if (out.n_decreto) c += 25
+  if (out.fecha_decreto) c += 15
+  if (out.fecha_inicio) c += 30
+  if (out.fecha_termino || out.fecha_termino_texto) c += 20
+  if (out.horas) c += 10
+  out.confianza = c
+
+  return out.confianza >= 40 ? out : out // devolver igual; el score decide afuera
+}
+
+/**
+ * RESOLUCIÓN FINAL N° … del Administrador Provisional.
+ */
+function parsePlantillaResolucionFinal(text, archivo) {
+  const line = unaLinea(text)
+  const U = line.toUpperCase()
+  if (!/RESOLUC(?:I[OÓ]N)?\s+FINAL|RESUELVO\s*:|PER[IÍ]ODO\s+DE\s+VIGENCIA/i.test(U)) {
+    return null
+  }
+
+  const out = vacio()
+  out.plantilla = 'resolucion_final'
+  out.tipo_acto = 'Resolución'
+  out.extracto = line.slice(0, 500)
+
+  const resFinal = U.match(/\bRESOLUC(?:I[OÓ]N)?\s+FINAL\s*N[°ºO.]?\s*0*([0-9]{1,6})\b/)
+  const nArchivo = nDesdeNombreArchivo(archivo)
+  if (resFinal) out.n_decreto = String(parseInt(resFinal[1], 10))
+  else if (nArchivo) out.n_decreto = nArchivo
+
+  // Preferir archivo si FINAL no matcheó y hay N° en nombre
+  if (nArchivo && !resFinal) out.n_decreto = nArchivo
+
+  const fd = U.match(
+    /TALCAHUANO[,\s]+(?:A\s+)?(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+(\d{4})/i
+  )
+  if (fd) out.fecha_decreto = fechaLarga(fd[1], fd[2], fd[3])
+
+  const vigencia = U.match(
+    /PER[IÍ]ODO\s+DE\s+VIGENCIA\s*[:.]?\s*(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+(\d{4})\s+AL\s+(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+(\d{4})/i
+  )
+  if (vigencia) {
+    out.fecha_inicio = fechaLarga(vigencia[1], vigencia[2], vigencia[3])
+    out.fecha_termino = fechaLarga(vigencia[4], vigencia[5], vigencia[6])
+  }
+
+  const hm =
+    U.match(/HORAS?\s*CRONOL[OÓ]GICAS?\s*SEMANALES?\s*[:.]?\s*(\d{1,2})/i) ||
+    U.match(/\b(\d{1,2})\s*HRS?\.?\b/)
+  if (hm) {
+    const nH = Number(hm[1])
+    // Evitar "1." de "1.RATIFIQUESE"
+    if (nH >= 2 && nH <= 44) out.horas = nH
+    else if (nH === 1 && /HORAS?\s*CRONOL|HRS/i.test(U)) out.horas = 1
+  }
+
+  const em = U.match(/\b(F-?\d{2,4}\s+[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s.\-]{2,40}?)(?=\s+[A-Za-z]\)|\s+JORNADA|\s+NIVEL|\s+CALIDAD|\s+PER[IÍ]ODO|$)/i)
+  if (em) out.establecimiento = em[1].replace(/\s+/g, ' ').trim().slice(0, 100)
+
+  let c = 0
+  if (out.n_decreto) c += 25
+  if (out.fecha_decreto) c += 15
+  if (out.fecha_inicio) c += 30
+  if (out.fecha_termino) c += 20
+  if (out.horas) c += 10
+  out.confianza = c
+  return out
+}
+
+function parseHeuristico(text, archivo) {
+  const line = unaLinea(text)
+  const U = line.toUpperCase()
+  const out = vacio()
+  out.plantilla = 'heuristica'
+  out.extracto = line.slice(0, 500)
 
   const nArchivo = nDesdeNombreArchivo(archivo)
-
-  // 1) RESOLUCIÓN FINAL N° 01361 (encabezado del acto — NO el VISTOS)
-  const resFinal =
-    u.match(/\bRESOLUC(?:I[OÓ]N)?\s+FINAL\s*N[°ºO.]?\s*0*([0-9]{1,6})\b/) ||
-    u.match(/\bRESOLUC(?:I[OÓ]N)?\s+EXENTA\s+FINAL\s*N[°ºO.]?\s*0*([0-9]{1,6})\b/)
-
-  // 2) DECRETO DAEM (OCR puede meter basura: "DECRETO DAEM No a OL 341")
   const decretoDaem =
-    u.match(/\bDECRETO\s+DAEM\b[^0-9]{0,30}?0*([0-9]{3,6})\b/) ||
-    u.match(/\bDECRETO(?:\s+EXENTO)?\s*(?:N[°ºO.]?\s*)?[:.]?\s*0*([0-9]{1,6})\b/)
+    U.match(/\bDECRETO\s+DAEM\b[^0-9]{0,30}?0*([0-9]{3,6})\b/) ||
+    U.match(/\bDECRETO(?:\s+EXENTO)?\s*N[°ºO.]?\s*0*([0-9]{1,6})\b/)
+  const resFinal = U.match(/\bRESOLUC(?:I[OÓ]N)?\s+FINAL\s*N[°ºO.]?\s*0*([0-9]{1,6})\b/)
 
   if (resFinal) {
     out.n_decreto = String(parseInt(resFinal[1], 10))
@@ -109,51 +354,15 @@ function parseActoFromText(text, archivo) {
     out.tipo_acto = 'Decreto'
   } else if (nArchivo) {
     out.n_decreto = nArchivo
-    out.tipo_acto = /RESOLUC|REX/i.test(String(archivo || ''))
-      ? 'Resolución'
-      : /\bDECRETO\b/i.test(String(archivo || ''))
-        ? 'Decreto'
-        : 'Resolución/Decreto'
-  } else {
-    // Último recurso: resolución/decreto que NO sea "Exenta … con fecha" del VISTOS
-    const candidatos = [...u.matchAll(/\b(?:RESOLUC(?:I[OÓ]N)?|DECRETO|REX)\s*(?:EXENTA\s+)?(?:FINAL\s+)?N[°ºO.]?\s*0*([0-9]{1,6})\b/g)]
-    for (const c of candidatos) {
-      const ctx = u.slice(Math.max(0, c.index - 30), c.index + 50)
-      if (/VISTOS|EXENTA\s+N[°º].{0,20}CON\s+FECHA|SUPERINTENDENCIA/i.test(ctx) && !/FINAL/i.test(ctx)) {
-        continue
-      }
-      if (/\/\s*\d{1,2}/.test(ctx)) continue // N° 6/29-03-2019
-      out.n_decreto = String(parseInt(c[1], 10))
-      out.tipo_acto = /DECRETO/i.test(c[0]) ? 'Decreto' : 'Resolución'
-      break
-    }
+    out.tipo_acto = /\bDECRETO\b/i.test(String(archivo || '')) ? 'Decreto' : 'Resolución'
   }
 
-  // Si el archivo trae N° y el texto sacó otro (p.ej. 168 del VISTOS), preferir archivo
-  if (nArchivo && out.n_decreto && nArchivo !== out.n_decreto) {
-    // Solo override si el parseado parece del VISTOS (número chico o distinto al del nombre)
-    if (!resFinal && !decretoDaem) {
-      out.n_decreto = nArchivo
-    }
-  }
-  if (nArchivo && !out.n_decreto) out.n_decreto = nArchivo
-
-  // Fecha del acto: TALCAHUANO, 17 DE JUNIO DE 2026
-  const ciudadFecha = u.match(
+  const fd = U.match(
     /TALCAHUANO[,\s]+(?:A\s+)?(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+(\d{4})/i
   )
-  if (ciudadFecha) {
-    out.fecha_decreto = fechaLarga(ciudadFecha[1], ciudadFecha[2], ciudadFecha[3])
-  } else {
-    out.fecha_decreto = parseFechaLargaEnTexto(u)
-  }
-  if (!out.fecha_decreto) {
-    const fechaCtx = t.match(/(?:DE\s+FECHA|FECHA[:\s])\s*(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/i)
-    if (fechaCtx) out.fecha_decreto = ymd(`${fechaCtx[1]}/${fechaCtx[2]}/${fechaCtx[3]}`)
-  }
+  if (fd) out.fecha_decreto = fechaLarga(fd[1], fd[2], fd[3])
 
-  // Periodo de vigencia: 01 de marzo del 2026 al 28 de febrero del 2027
-  const vigencia = u.match(
+  const vigencia = U.match(
     /PER[IÍ]ODO\s+DE\s+VIGENCIA\s*[:.]?\s*(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+(\d{4})\s+AL\s+(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+(\d{4})/i
   )
   if (vigencia) {
@@ -161,84 +370,73 @@ function parseActoFromText(text, archivo) {
     out.fecha_termino = fechaLarga(vigencia[4], vigencia[5], vigencia[6])
   }
 
-  // FECHA DE INICIO / TÉRMINO etiquetadas (decretos DAEM)
-  if (!out.fecha_inicio) {
-    const ini =
-      t.match(/FECHA\s+DE\s+INICIO\s*[:.]?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})/i) ||
-      t.match(/(?:DESDE|A\s+CONTAR(?:\s+DEL)?)\s*[:.]?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})/i)
-    if (ini) out.fecha_inicio = ymd(ini[1])
+  const ini = line.match(/FECHA\s+DE\s+INICIO\s*[:.]?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})/i)
+  if (ini) out.fecha_inicio = out.fecha_inicio || ymdSlash(ini[1])
+
+  const fechas = todasFechasLargas(U)
+  if (!out.fecha_inicio && fechas.length >= 2) out.fecha_inicio = fechas[1].iso
+  if (!out.fecha_termino && fechas.length >= 3) out.fecha_termino = fechas[2].iso
+
+  const hm = U.match(/JORNADA[^0-9]{0,20}(\d{1,2})\s*HORAS?/i) || U.match(/HORAS?\s*CRONOL[OÓ]GICAS?\s*SEMANALES?\s*[:.]?\s*(\d{1,2})/i)
+  if (hm) {
+    const nH = Number(hm[1])
+    if (nH >= 1 && nH <= 44) out.horas = nH
   }
 
-  if (!out.fecha_termino) {
-    const terFecha = t.match(/FECHA\s+DE\s+T[EÉ]RMINO\s*[:.]?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})/i)
-    if (terFecha) {
-      out.fecha_termino = ymd(terFecha[1])
-    } else {
-      const terTxt = t.match(
-        /FECHA\s+DE\s+T[EÉ]RMINO\s*[:.]?\s*([A-ZÁÉÍÓÚÑ0-9][A-ZÁÉÍÓÚÑ0-9\s./-]{3,60})/i
-      )
-      if (terTxt) {
-        out.fecha_termino_texto = terTxt[1]
-          .replace(/\s+/g, ' ')
-          .split(/\s+FIANZA|\s+AN[OÓ]TESE|\s+COMUNIQUESE/i)[0]
-          .trim()
-          .slice(0, 80)
-      }
-    }
-  }
+  const em = U.match(/\b(F-?\d{2,4}\s+[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s.\-]{2,40}?)\b/i)
+  if (em) out.establecimiento = em[1].replace(/\s+/g, ' ').trim().slice(0, 100)
 
-  // Período genérico dd/mm/yyyy al dd/mm/yyyy
-  if (!out.fecha_inicio || !out.fecha_termino) {
-    const per =
-      t.match(
-        /(?:DESDE|A\s+CONTAR|VIGENCIA|PER[IÍ]ODO)[^\d]{0,40}(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})[^\d]{0,40}(?:HASTA|AL|A)[^\d]{0,20}(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})/i
-      ) ||
-      t.match(/(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})\s*(?:AL|A|HASTA)\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})/i)
-    if (per) {
-      if (!out.fecha_inicio) out.fecha_inicio = ymd(per[1])
-      if (!out.fecha_termino) out.fecha_termino = ymd(per[2])
-    }
-  }
-
-  // Horas: "26 HRS" / "JORNADA : 18 HORAS" / "Nº De Horas Cronológicas Semanales: 26"
-  const h =
-    t.match(
-      /(?:N[°º]?\s*DE\s*)?HORAS?\s*CRONOL[OÓ]GICAS?\s*SEMANALES?\s*[:.]?\s*(\d{1,2})\s*(?:HRS?\.?|HORAS?)?/i
-    ) ||
-    t.match(/JORNADA\s*[:.]?\s*(\d{1,2})\s*HORAS?/i) ||
-    t.match(/(\d{1,2})\s*(?:HRS?\.?|HORAS?)(?:\s*CRONOL|\s*SEMANALES|\s*$|\s*[,.])/i) ||
-    t.match(/(?:CARGA\s*HORARIA)[^\d]{0,20}(\d{1,2})/i)
-  if (h) {
-    const n = Number(h[1])
-    if (n > 0 && n <= 44) out.horas = n
-  }
-
-  // Preferir código de colegio (F-509 …) / Liceo; evitar "establecimiento educacional" del VISTOS
-  const est =
-    t.match(/\b(F-?\d{2,4}\s+[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s.\-]{2,40}?)(?=\s+[A-Za-z]\)|\s+RAZ[OÓ]N|\s+FECHA\s+DE|\s+JORNADA|\s+NIVEL|\s+CALIDAD|\s+FIANZA|$)/i) ||
-    t.match(
-      /(?:^|\n|[A-Za-z]\))\s*ESTABLECIMIENTO\s*[:.]?\s*((?:F-?\d{2,4}|LICEO|COLEGIO|ESCUELA)[^.\n]{2,60}?)(?=\s+[A-Za-z]\)|\s+JORNADA|\s+NIVEL|\s+CALIDAD|\s+PER[IÍ]ODO|$)/i
-    ) ||
-    t.match(
-      /ESTAB(?:\.|LECIMIENTO)?\s*(?:EDUCACIONAL)?\s*[:.]?\s*((?:F-?\d{2,4}|LICEO|COLEGIO)[A-Z0-9ÁÉÍÓÚÑ\s.\-]{2,50}?)(?=\s+RAZ[OÓ]N|\s+FECHA\s+DE|\s+FIANZA|\s+JORNADA|$)/i
-    ) ||
-    t.match(/\b(LICEO\s+[A-Z0-9ÁÉÍÓÚÑ][A-Z0-9ÁÉÍÓÚÑ\s.\-]{2,50}?)(?=\s+RAZ[OÓ]N|\s+FECHA\s+DE|$)/i)
-  if (est) {
-    out.establecimiento = est[1].replace(/\s+/g, ' ').trim().slice(0, 100)
-  }
-
-  if (!out.tipo_acto) {
-    if (/RESOLUC|REX/i.test(u) || /RESOLUC|REX/i.test(String(archivo || ''))) out.tipo_acto = 'Resolución'
-    else if (/DECRETO/i.test(u) || /DECRETO/i.test(String(archivo || ''))) out.tipo_acto = 'Decreto'
-  }
-
+  let c = 0
+  if (out.n_decreto) c += 20
+  if (out.fecha_decreto) c += 10
+  if (out.fecha_inicio) c += 30
+  if (out.fecha_termino || out.fecha_termino_texto) c += 20
+  if (out.horas) c += 10
+  out.confianza = c
   return out
+}
+
+/**
+ * Elige la mejor interpretación entre plantillas.
+ */
+function parseActoFromText(text, archivo) {
+  const candidatos = []
+  const daem = parsePlantillaDaem(text, archivo)
+  if (daem) candidatos.push(daem)
+  const res = parsePlantillaResolucionFinal(text, archivo)
+  if (res) candidatos.push(res)
+  candidatos.push(parseHeuristico(text, archivo))
+
+  candidatos.sort((a, b) => (b.confianza || 0) - (a.confianza || 0))
+  const best = candidatos[0] || vacio()
+  best.parser_version = PARSER_VERSION
+  if (!best.extracto) best.extracto = unaLinea(text).slice(0, 500)
+
+  // Si el nombre de archivo trae N° y la plantilla no es FINAL/DAEM clara, alinear
+  const nArchivo = nDesdeNombreArchivo(archivo)
+  if (nArchivo && best.plantilla === 'heuristica' && !best.n_decreto) best.n_decreto = nArchivo
+
+  return best
+}
+
+/** Ratio de caracteres “raros” → texto basura de OCR embebido. */
+function textoEsBasura(text) {
+  const s = String(text || '')
+  if (s.replace(/\s+/g, '').length < 40) return true
+  const raro = (s.match(/[^\w\sÁÉÍÓÚÑáéíóúñ°º.,;:()\-\/°#"']/g) || []).length
+  const letters = (s.match(/[A-Za-zÁÉÍÓÚÑáéíóúñ]/g) || []).length
+  if (letters < 30) return true
+  return raro / Math.max(s.length, 1) > 0.12
 }
 
 module.exports = {
   parseActoFromText,
-  normalizarOcr,
-  ymd,
+  parsePlantillaDaem,
+  parsePlantillaResolucionFinal,
+  normalizarTexto,
+  unaLinea,
+  ymd: ymdSlash,
   nDesdeNombreArchivo,
+  textoEsBasura,
   PARSER_VERSION,
 }

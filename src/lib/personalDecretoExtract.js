@@ -1,6 +1,6 @@
 /**
- * Descarga PDF de personal_documentos, extrae texto (pdf-parse) o OCR (gs+tesseract)
- * y parsea campos de decreto/resolución. Cachea en extraccion_json.
+ * Descarga PDF → texto limpio (pdf-parse) o OCR (gs + tesseract spa/eng) → parse por plantilla.
+ * Invalida texto basura embebido y cachea resultado con parser_version.
  */
 const fs = require('fs')
 const os = require('os')
@@ -10,18 +10,37 @@ const { promisify } = require('util')
 const axios = require('axios')
 const pdfParse = require('pdf-parse')
 const db = require('../db')
-const { parseActoFromText, PARSER_VERSION } = require('./personalDecretoParse')
+const {
+  parseActoFromText,
+  textoEsBasura,
+  PARSER_VERSION,
+} = require('./personalDecretoParse')
 
 const execFileAsync = promisify(execFile)
-const MIN_TEXT_CHARS = 80
-const OCR_DPI = 180
-const MAX_OCR_PAGES = 2
+const MIN_TEXT_CHARS = 60
+const OCR_DPI = 280
+const MAX_OCR_PAGES = 3
+
+/** Carpeta tessdata del repo (spa + eng). */
+function tessdataDir() {
+  const candidates = [
+    path.join(__dirname, '../../tessdata'),
+    path.join(process.cwd(), 'tessdata'),
+    process.env.TESSDATA_PREFIX,
+  ].filter(Boolean)
+  for (const c of candidates) {
+    if (c && fs.existsSync(path.join(c, 'eng.traineddata'))) return c
+    if (c && fs.existsSync(path.join(c, 'spa.traineddata'))) return c
+  }
+  return null
+}
 
 function run(cmd, args, opts = {}) {
   return execFileAsync(cmd, args, {
-    timeout: opts.timeout || 90000,
-    maxBuffer: 12 * 1024 * 1024,
+    timeout: opts.timeout || 120000,
+    maxBuffer: 16 * 1024 * 1024,
     encoding: 'utf8',
+    env: { ...process.env, ...(opts.env || {}) },
     ...opts,
   })
 }
@@ -39,9 +58,12 @@ async function fetchPdfBuffer(filePath) {
 async function textFromPdfParse(buf) {
   try {
     const parsed = await pdfParse(buf)
-    return String(parsed.text || '').trim()
+    return {
+      text: String(parsed.text || '').trim(),
+      pages: parsed.numpages || parsed.n || null,
+    }
   } catch {
-    return ''
+    return { text: '', pages: null }
   }
 }
 
@@ -49,6 +71,9 @@ async function ocrPdfBuffer(buf, stamp) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sigex-dec-'))
   const pdfPath = path.join(dir, `${stamp}.pdf`)
   const pngPattern = path.join(dir, 'p-%d.png')
+  const tessDir = tessdataDir()
+  const env = tessDir ? { ...process.env, TESSDATA_PREFIX: tessDir } : process.env
+
   try {
     fs.writeFileSync(pdfPath, buf)
     try {
@@ -59,39 +84,68 @@ async function ocrPdfBuffer(buf, stamp) {
           '-dBATCH',
           '-dNOPAUSE',
           '-dQUIET',
-          '-sDEVICE=png16m',
+          '-sDEVICE=pnggray',
           `-r${OCR_DPI}`,
           '-dFirstPage=1',
           `-dLastPage=${MAX_OCR_PAGES}`,
           `-sOutputFile=${pngPattern}`,
           pdfPath,
         ],
-        { timeout: 120000 }
+        { timeout: 180000 }
       )
     } catch (e) {
-      return { text: '', error: `gs: ${e.message}` }
+      return { text: '', error: `gs: ${e.message}`, metodo: 'ocr-fail-gs' }
     }
 
     let text = ''
+    const langs = []
+    if (tessDir && fs.existsSync(path.join(tessDir, 'spa.traineddata'))) langs.push('spa')
+    if (tessDir && fs.existsSync(path.join(tessDir, 'eng.traineddata'))) langs.push('eng')
+    if (!langs.length) langs.push('eng')
+
     for (let i = 1; i <= MAX_OCR_PAGES; i++) {
       const png = path.join(dir, `p-${i}.png`)
       if (!fs.existsSync(png)) continue
-      // Preferir spa; fallback eng (Railway puede no tener spa.traineddata)
+
+      // Preprocesar contraste si ImageMagick está disponible
+      let img = png
+      const prep = path.join(dir, `p-${i}-prep.png`)
+      try {
+        await run(
+          'convert',
+          [png, '-colorspace', 'Gray', '-normalize', '-sharpen', '0x1', prep],
+          { timeout: 30000 }
+        )
+        if (fs.existsSync(prep)) img = prep
+      } catch {
+        /* gs png ya es gray */
+      }
+
       let pageText = ''
-      for (const lang of ['spa', 'eng']) {
+      for (const lang of langs) {
         try {
-          const { stdout } = await run('tesseract', [png, 'stdout', '-l', lang, '--psm', '6'], {
-            timeout: 120000,
-          })
-          pageText = String(stdout || '')
-          if (pageText.replace(/\s+/g, '').length > 40) break
+          const { stdout } = await run(
+            'tesseract',
+            [img, 'stdout', '-l', lang, '--psm', '6', '--oem', '1'],
+            { timeout: 180000, env }
+          )
+          const t = String(stdout || '')
+          if (t.replace(/\s+/g, '').length > pageText.replace(/\s+/g, '').length) pageText = t
+          if (!textoEsBasura(t) && t.replace(/\s+/g, '').length > 80) break
         } catch {
-          /* try next lang */
+          /* next lang */
         }
       }
       text += `\n${pageText}`
     }
-    return { text: text.trim(), error: null }
+
+    return {
+      text: text.trim(),
+      error: null,
+      metodo: 'ocr-tesseract',
+      tessdata: tessDir || 'system',
+      langs,
+    }
   } finally {
     try {
       for (const f of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, f))
@@ -102,33 +156,45 @@ async function ocrPdfBuffer(buf, stamp) {
   }
 }
 
+/**
+ * Obtiene el mejor texto posible del PDF.
+ */
 async function extractTextFromPdfBuffer(buf, stamp) {
-  let text = await textFromPdfParse(buf)
+  const parsed = await textFromPdfParse(buf)
+  let text = parsed.text
   let metodo = 'pdf-parse'
-  if (text.replace(/\s+/g, '').length < MIN_TEXT_CHARS) {
+  let pages = parsed.pages
+
+  const basura = textoEsBasura(text)
+  const corto = text.replace(/\s+/g, '').length < MIN_TEXT_CHARS
+
+  if (basura || corto) {
     const ocr = await ocrPdfBuffer(buf, stamp)
-    if (ocr.text && ocr.text.replace(/\s+/g, '').length >= MIN_TEXT_CHARS) {
+    const ocrOk = ocr.text && !textoEsBasura(ocr.text) && ocr.text.replace(/\s+/g, '').length >= MIN_TEXT_CHARS
+    if (ocrOk) {
       text = ocr.text
-      metodo = 'ocr-tesseract'
-    } else if (!text) {
-      text = ocr.text || ''
-      metodo = ocr.error ? `ocr-fail:${ocr.error}` : 'ocr-vacio'
+      metodo = ocr.metodo
+    } else if (corto && ocr.text) {
+      text = ocr.text
+      metodo = ocr.metodo || 'ocr-debil'
+    } else if (basura && !ocrOk) {
+      // Mantener pdf-parse solo si OCR falló peor; marcar basura
+      metodo = ocr.error ? `pdf-basura+${ocr.error}` : 'pdf-basura'
     }
   }
-  return { text, metodo }
+
+  return { text, metodo, pages }
 }
 
-/**
- * Extrae campos de un documento; usa cache en personal_documentos.extraccion_json.
- * @param {{ id: string, nombre_archivo?: string, file_path?: string, extraccion_json?: object }} doc
- */
 async function extraerCamposDocumento(doc, { force = false } = {}) {
   const cached = doc.extraccion_json
   const cacheOk =
     cached &&
     typeof cached === 'object' &&
     Number(cached.parser_version) >= PARSER_VERSION &&
-    (cached.n_decreto || cached.fecha_inicio || cached.fecha_decreto || cached.metodo)
+    Number(cached.confianza || 0) >= 50 &&
+    (cached.fecha_inicio || (cached.n_decreto && cached.fecha_decreto))
+
   if (!force && cacheOk) {
     return { ...cached, desde_cache: true }
   }
@@ -140,20 +206,39 @@ async function extraerCamposDocumento(doc, { force = false } = {}) {
       fecha_inicio: null,
       fecha_termino: null,
       horas: null,
+      confianza: 0,
       metodo: 'sin-archivo',
+      parser_version: PARSER_VERSION,
       error: 'Sin file_path',
     }
   }
 
   try {
     const buf = await fetchPdfBuffer(doc.file_path)
-    const { text, metodo } = await extractTextFromPdfBuffer(buf, String(doc.id).slice(0, 8))
+    const { text, metodo, pages } = await extractTextFromPdfBuffer(buf, String(doc.id).slice(0, 8))
     const parsed = parseActoFromText(text, doc.nombre_archivo)
+
+    // Si confianza baja y aún no OCR-eamos, forzar OCR
+    let final = parsed
+    let metodoFinal = metodo
+    if ((parsed.confianza || 0) < 50 && !String(metodo).startsWith('ocr')) {
+      const ocr = await ocrPdfBuffer(buf, `${String(doc.id).slice(0, 8)}b`)
+      if (ocr.text && ocr.text.replace(/\s+/g, '').length >= MIN_TEXT_CHARS) {
+        const parsedOcr = parseActoFromText(ocr.text, doc.nombre_archivo)
+        if ((parsedOcr.confianza || 0) >= (parsed.confianza || 0)) {
+          final = parsedOcr
+          metodoFinal = ocr.metodo
+        }
+      }
+    }
+
     const result = {
-      ...parsed,
-      metodo,
+      ...final,
+      metodo: metodoFinal,
+      pages,
       chars: (text || '').length,
       extracted_at: new Date().toISOString(),
+      parser_version: PARSER_VERSION,
     }
 
     try {
@@ -164,7 +249,6 @@ async function extraerCamposDocumento(doc, { force = false } = {}) {
         [doc.id, JSON.stringify(result)]
       )
     } catch (e) {
-      // Columna puede no existir aún en algún entorno
       if (!/extraccion_json|column/i.test(e.message || '')) throw e
     }
 
@@ -176,7 +260,9 @@ async function extraerCamposDocumento(doc, { force = false } = {}) {
       fecha_inicio: null,
       fecha_termino: null,
       horas: null,
+      confianza: 0,
       metodo: 'error',
+      parser_version: PARSER_VERSION,
       error: e.message || String(e),
     }
   }
@@ -201,5 +287,7 @@ module.exports = {
   extractTextFromPdfBuffer,
   parseActoFromText,
   mapPool,
+  tessdataDir,
+  PARSER_VERSION,
   MIN_TEXT_CHARS,
 }

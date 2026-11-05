@@ -108,32 +108,49 @@ router.get('/titularidad/datos', auth, async (req, res) => {
 
     const extracciones = await mapPool(aExtraer, 2, (doc) => extraerCamposDocumento(doc, { force }))
 
-    const decretos = aExtraer.map((d, idx) => {
-      const x = extracciones[idx] || {}
-      const nFromName =
-        (String(d.nombre_archivo || '').match(/_(\d{2,6})\.pdf$/i) || [])[1] || null
-      return {
-        doc_id: d.id,
-        tipo: labelTipo(d.tipo_documental, d.nombre_archivo, x.tipo_acto),
-        tipo_documental: d.tipo_documental,
-        tipo_label: tipoDocumentalLabel(d.tipo_documental),
-        n_decreto: x.n_decreto || nFromName || null,
-        fecha_decreto: x.fecha_decreto || null,
-        fecha_inicio: x.fecha_inicio || null,
-        fecha_termino: x.fecha_termino || null,
-        fecha_termino_texto: x.fecha_termino_texto || null,
-        horas: x.horas != null ? x.horas : null,
-        establecimiento: x.establecimiento || f.ubicacion || null,
-        fuente: d.nombre_archivo || 'PDF carpeta SIGEX',
-        nombre_archivo: d.nombre_archivo,
-        url_archivo: `/api/personal/funcionarios/${f.id}/documentos/${d.id}/archivo`,
-        metodo_extraccion: x.metodo || null,
-        desde_cache: !!x.desde_cache,
-        error_extraccion: x.error || null,
-        origen_carga: d.origen_carga || null,
-        created_at: d.created_at || null,
-      }
-    })
+    const decretos = aExtraer
+      .map((d, idx) => {
+        const x = extracciones[idx] || {}
+        const nFromName =
+          (String(d.nombre_archivo || '').match(/_(\d{2,6})\.pdf$/i) || [])[1] || null
+        const confianza = Number(x.confianza || 0)
+        const fidedigno =
+          confianza >= 50 && !!(x.fecha_inicio || (x.n_decreto && x.fecha_decreto && x.horas != null))
+        return {
+          doc_id: d.id,
+          tipo: labelTipo(d.tipo_documental, d.nombre_archivo, x.tipo_acto),
+          tipo_documental: d.tipo_documental,
+          tipo_label: tipoDocumentalLabel(d.tipo_documental),
+          n_decreto: x.n_decreto || nFromName || null,
+          fecha_decreto: x.fecha_decreto || null,
+          fecha_inicio: x.fecha_inicio || null,
+          fecha_termino: x.fecha_termino || null,
+          fecha_termino_texto: x.fecha_termino_texto || null,
+          horas: x.horas != null ? x.horas : null,
+          establecimiento: x.establecimiento || f.ubicacion || null,
+          fuente: d.nombre_archivo || 'PDF carpeta SIGEX',
+          nombre_archivo: d.nombre_archivo,
+          url_archivo: `/api/personal/funcionarios/${f.id}/documentos/${d.id}/archivo`,
+          metodo_extraccion: x.metodo || null,
+          plantilla: x.plantilla || null,
+          confianza,
+          fidedigno,
+          pages: x.pages || null,
+          desde_cache: !!x.desde_cache,
+          error_extraccion: x.error || null,
+          origen_carga: d.origen_carga || null,
+          created_at: d.created_at || null,
+        }
+      })
+      // Consolidados enormes sin lectura fidedigna: no contaminar la ficha
+      .filter((d) => !(d.pages > 8 && !d.fidedigno))
+      .sort((a, b) => {
+        // Primero fidedignos; luego por fecha inicio/decreto
+        if (a.fidedigno !== b.fidedigno) return a.fidedigno ? -1 : 1
+        return String(b.fecha_inicio || b.fecha_decreto || '').localeCompare(
+          String(a.fecha_inicio || a.fecha_decreto || '')
+        )
+      })
 
     const liquidaciones = liqR.rows.map((l) => ({
       id: l.id,
