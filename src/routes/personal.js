@@ -24,6 +24,7 @@ router.use(personalLiquidaciones)
 router.use(personalLicencias)
 router.use(require('./personalLmePaquete')) // Paquete LME (solo lectura)
 router.use(require('./personalLmeRobot')) // Robot LME: interruptor y registro (admin + usuario robot)
+router.use(require('./personalTitularidad')) // Titularidad Ley 21.803 (lectura + OCR decretos)
 router.use(personalCarpetas)
 
 const upload = multer({

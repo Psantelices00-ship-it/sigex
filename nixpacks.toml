@@ -1,2 +1,3 @@
 [phases.setup]
-nixPkgs = ["nodejs", "ghostscript"]
+# ghostscript + tesseract: OCR de decretos escaneados (titularidad). eng viene con tesseract.
+nixPkgs = ["nodejs", "ghostscript", "tesseract"]
