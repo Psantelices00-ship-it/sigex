@@ -10,7 +10,7 @@ const { promisify } = require('util')
 const axios = require('axios')
 const pdfParse = require('pdf-parse')
 const db = require('../db')
-const { parseActoFromText } = require('./personalDecretoParse')
+const { parseActoFromText, PARSER_VERSION } = require('./personalDecretoParse')
 
 const execFileAsync = promisify(execFile)
 const MIN_TEXT_CHARS = 80
@@ -124,7 +124,12 @@ async function extractTextFromPdfBuffer(buf, stamp) {
  */
 async function extraerCamposDocumento(doc, { force = false } = {}) {
   const cached = doc.extraccion_json
-  if (!force && cached && typeof cached === 'object' && (cached.n_decreto || cached.fecha_inicio || cached.metodo)) {
+  const cacheOk =
+    cached &&
+    typeof cached === 'object' &&
+    Number(cached.parser_version) >= PARSER_VERSION &&
+    (cached.n_decreto || cached.fecha_inicio || cached.fecha_decreto || cached.metodo)
+  if (!force && cacheOk) {
     return { ...cached, desde_cache: true }
   }
 

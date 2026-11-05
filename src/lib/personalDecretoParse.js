@@ -1,6 +1,6 @@
 /**
  * Extrae campos de un decreto/resolución de nombramiento desde texto (pdf-parse u OCR).
- * Tolerante a ruido típico de Tesseract (":" → "+", "N°" → "NP", etc.).
+ * Prioridad del N°: nombre de archivo → RESOLUCIÓN FINAL / DECRETO DAEM → nunca el VISTOS.
  */
 
 const MESES = {
@@ -19,6 +19,9 @@ const MESES = {
   DICIEMBRE: '12',
 }
 
+/** Versión de parser: si sube, se invalida extraccion_json antigua. */
+const PARSER_VERSION = 2
+
 function ymd(v) {
   if (!v) return null
   if (v instanceof Date && !Number.isNaN(v.getTime())) return v.toISOString().slice(0, 10)
@@ -27,6 +30,12 @@ function ymd(v) {
   if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10)
   return null
+}
+
+function fechaLarga(dia, mesNombre, anio) {
+  const mm = MESES[String(mesNombre || '').toUpperCase().normalize('NFD').replace(/\p{M}/gu, '')]
+  if (!mm || !anio) return null
+  return `${anio}-${mm}-${String(dia).padStart(2, '0')}`
 }
 
 function normalizarOcr(text) {
@@ -41,14 +50,21 @@ function normalizarOcr(text) {
     .trim()
 }
 
-function parseFechaLarga(text) {
+function nDesdeNombreArchivo(archivo) {
+  const name = String(archivo || '').trim()
+  let m = name.match(/^(\d{7,8})(?:-[0-9Kk])?_.+_(\d+)\.pdf$/i)
+  if (m) return String(parseInt(m[2], 10))
+  m = name.match(/^(\d{7,8})(?:-[0-9Kk])?_(\d+)\.pdf$/i)
+  if (m) return String(parseInt(m[2], 10))
+  return null
+}
+
+function parseFechaLargaEnTexto(text) {
   const m = String(text || '').match(
-    /(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+DE\s+(\d{4})/i
+    /(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+(\d{4})/i
   )
   if (!m) return null
-  const mm = MESES[String(m[2]).toUpperCase()]
-  if (!mm) return null
-  return `${m[3]}-${mm}-${String(m[1]).padStart(2, '0')}`
+  return fechaLarga(m[1], m[2], m[3])
 }
 
 /**
@@ -70,78 +86,108 @@ function parseActoFromText(text, archivo) {
     horas: null,
     establecimiento: null,
     extracto: t.slice(0, 500),
+    parser_version: PARSER_VERSION,
   }
 
-  // Número: priorizar DECRETO DAEM / DECRETO (evitar RESOLUCIÓN del VISTOS, p.ej. "Resolución N° 6/2019")
-  // OCR a veces deja basura entre DAEM y el número: "DECRETO DAEM No a OL 341"
-  const decretoNum =
+  const nArchivo = nDesdeNombreArchivo(archivo)
+
+  // 1) RESOLUCIÓN FINAL N° 01361 (encabezado del acto — NO el VISTOS)
+  const resFinal =
+    u.match(/\bRESOLUC(?:I[OÓ]N)?\s+FINAL\s*N[°ºO.]?\s*0*([0-9]{1,6})\b/) ||
+    u.match(/\bRESOLUC(?:I[OÓ]N)?\s+EXENTA\s+FINAL\s*N[°ºO.]?\s*0*([0-9]{1,6})\b/)
+
+  // 2) DECRETO DAEM (OCR puede meter basura: "DECRETO DAEM No a OL 341")
+  const decretoDaem =
     u.match(/\bDECRETO\s+DAEM\b[^0-9]{0,30}?0*([0-9]{3,6})\b/) ||
-    u.match(/\bDECRETO(?:\s+EXENTO)?\s*(?:N[°ºO.]?\s*)?[:.]?\s*0*([0-9]{1,6})\b/) ||
-    u.match(/\bDTO\.?\s*(?:N[°ºO.]?\s*)?[:.]?\s*0*([0-9]{1,6})\b/)
+    u.match(/\bDECRETO(?:\s+EXENTO)?\s*(?:N[°ºO.]?\s*)?[:.]?\s*0*([0-9]{1,6})\b/)
 
-  if (decretoNum) {
-    out.n_decreto = String(parseInt(decretoNum[1], 10))
+  if (resFinal) {
+    out.n_decreto = String(parseInt(resFinal[1], 10))
+    out.tipo_acto = 'Resolución'
+  } else if (decretoDaem) {
+    out.n_decreto = String(parseInt(decretoDaem[1], 10))
     out.tipo_acto = 'Decreto'
-  } else if (/\bDECRETO\b/.test(u) === false || /RESOLUC|REX/i.test(String(archivo || ''))) {
-    // Resolución solo si no hay DECRETO en el texto o el archivo es resolución
-    const resNum = u.match(
-      /\b(?:RESOLUC(?:I[OÓ]N)?(?:\s+EXENTA)?|REX\.?|RES\.?\s*EX\.?)\s*(?:N[°ºO.]?\s*)?[:.]?\s*0*([0-9]{1,6})\b/
-    )
-    const ctx = resNum
-      ? u.slice(Math.max(0, resNum.index || 0), (resNum.index || 0) + 30)
-      : ''
-    // Ignorar "RESOLUCIÓN N° 6/29-03-2019" del VISTOS
-    if (resNum && !/\/\s*\d{1,2}/.test(ctx)) {
-      out.n_decreto = String(parseInt(resNum[1], 10))
-      out.tipo_acto = 'Resolución'
+  } else if (nArchivo) {
+    out.n_decreto = nArchivo
+    out.tipo_acto = /RESOLUC|REX/i.test(String(archivo || ''))
+      ? 'Resolución'
+      : /\bDECRETO\b/i.test(String(archivo || ''))
+        ? 'Decreto'
+        : 'Resolución/Decreto'
+  } else {
+    // Último recurso: resolución/decreto que NO sea "Exenta … con fecha" del VISTOS
+    const candidatos = [...u.matchAll(/\b(?:RESOLUC(?:I[OÓ]N)?|DECRETO|REX)\s*(?:EXENTA\s+)?(?:FINAL\s+)?N[°ºO.]?\s*0*([0-9]{1,6})\b/g)]
+    for (const c of candidatos) {
+      const ctx = u.slice(Math.max(0, c.index - 30), c.index + 50)
+      if (/VISTOS|EXENTA\s+N[°º].{0,20}CON\s+FECHA|SUPERINTENDENCIA/i.test(ctx) && !/FINAL/i.test(ctx)) {
+        continue
+      }
+      if (/\/\s*\d{1,2}/.test(ctx)) continue // N° 6/29-03-2019
+      out.n_decreto = String(parseInt(c[1], 10))
+      out.tipo_acto = /DECRETO/i.test(c[0]) ? 'Decreto' : 'Resolución'
+      break
     }
   }
 
-  if (!out.n_decreto && archivo) {
-    const fm =
-      String(archivo).match(/^(\d{7,8})(?:-[0-9Kk])?_.+_(\d+)\.pdf$/i) ||
-      String(archivo).match(/^(\d{7,8})(?:-[0-9Kk])?_(\d+)\.pdf$/i)
-    if (fm) {
-      out.n_decreto = String(parseInt(fm[2], 10))
-      out.tipo_acto = out.tipo_acto || 'Resolución/Decreto'
+  // Si el archivo trae N° y el texto sacó otro (p.ej. 168 del VISTOS), preferir archivo
+  if (nArchivo && out.n_decreto && nArchivo !== out.n_decreto) {
+    // Solo override si el parseado parece del VISTOS (número chico o distinto al del nombre)
+    if (!resFinal && !decretoDaem) {
+      out.n_decreto = nArchivo
     }
   }
+  if (nArchivo && !out.n_decreto) out.n_decreto = nArchivo
 
-  // Fecha del acto: "TALCAHUANO 15 DE MARZO DE 2023" / DE FECHA
-  out.fecha_decreto =
-    parseFechaLarga(
-      (u.match(/TALCAHUANO[,\s]+(?:A\s+)?(.{0,40}?DE\s+\d{4})/i) || [])[0] ||
-        (u.match(/(?:DE\s+FECHA|FECHA)[:\s]+(.{0,40}?DE\s+\d{4})/i) || [])[0] ||
-        u
-    ) || null
-
+  // Fecha del acto: TALCAHUANO, 17 DE JUNIO DE 2026
+  const ciudadFecha = u.match(
+    /TALCAHUANO[,\s]+(?:A\s+)?(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+(\d{4})/i
+  )
+  if (ciudadFecha) {
+    out.fecha_decreto = fechaLarga(ciudadFecha[1], ciudadFecha[2], ciudadFecha[3])
+  } else {
+    out.fecha_decreto = parseFechaLargaEnTexto(u)
+  }
   if (!out.fecha_decreto) {
-    const fechaCtx = t.match(/(?:DE\s+FECHA|FECHA[:\s]|TALCAHUANO[,\s]+A?)\s*(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/i)
+    const fechaCtx = t.match(/(?:DE\s+FECHA|FECHA[:\s])\s*(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/i)
     if (fechaCtx) out.fecha_decreto = ymd(`${fechaCtx[1]}/${fechaCtx[2]}/${fechaCtx[3]}`)
   }
 
-  // FECHA DE INICIO : 07/03/2023
-  const ini =
-    t.match(/FECHA\s+DE\s+INICIO\s*[:.]?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})/i) ||
-    t.match(/(?:DESDE|A\s+CONTAR(?:\s+DEL)?)\s*[:.]?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})/i)
-  if (ini) out.fecha_inicio = ymd(ini[1])
-
-  // FECHA DE TÉRMINO : 28/02/2024  ó  "TERMINO DE LICENCIA MEDICA"
-  const terFecha = t.match(
-    /FECHA\s+DE\s+T[EÉ]RMINO\s*[:.]?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})/i
+  // Periodo de vigencia: 01 de marzo del 2026 al 28 de febrero del 2027
+  const vigencia = u.match(
+    /PER[IÍ]ODO\s+DE\s+VIGENCIA\s*[:.]?\s*(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+(\d{4})\s+AL\s+(\d{1,2})\s+DE\s+(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|SETIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(?:DE|DEL)\s+(\d{4})/i
   )
-  if (terFecha) {
-    out.fecha_termino = ymd(terFecha[1])
-  } else {
-    const terTxt = t.match(/FECHA\s+DE\s+T[EÉ]RMINO\s*[:.]?\s*([A-ZÁÉÍÓÚÑ0-9][A-ZÁÉÍÓÚÑ0-9\s./-]{3,60})/i)
-    if (terTxt) {
-      const frase = terTxt[1].replace(/\s+/g, ' ').trim().slice(0, 80)
-      // Evitar arrastrar la siguiente etiqueta
-      out.fecha_termino_texto = frase.split(/\s+FIANZA|\s+AN[OÓ]TESE|\s+COMUNIQUESE/i)[0].trim()
+  if (vigencia) {
+    out.fecha_inicio = fechaLarga(vigencia[1], vigencia[2], vigencia[3])
+    out.fecha_termino = fechaLarga(vigencia[4], vigencia[5], vigencia[6])
+  }
+
+  // FECHA DE INICIO / TÉRMINO etiquetadas (decretos DAEM)
+  if (!out.fecha_inicio) {
+    const ini =
+      t.match(/FECHA\s+DE\s+INICIO\s*[:.]?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})/i) ||
+      t.match(/(?:DESDE|A\s+CONTAR(?:\s+DEL)?)\s*[:.]?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})/i)
+    if (ini) out.fecha_inicio = ymd(ini[1])
+  }
+
+  if (!out.fecha_termino) {
+    const terFecha = t.match(/FECHA\s+DE\s+T[EÉ]RMINO\s*[:.]?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{4})/i)
+    if (terFecha) {
+      out.fecha_termino = ymd(terFecha[1])
+    } else {
+      const terTxt = t.match(
+        /FECHA\s+DE\s+T[EÉ]RMINO\s*[:.]?\s*([A-ZÁÉÍÓÚÑ0-9][A-ZÁÉÍÓÚÑ0-9\s./-]{3,60})/i
+      )
+      if (terTxt) {
+        out.fecha_termino_texto = terTxt[1]
+          .replace(/\s+/g, ' ')
+          .split(/\s+FIANZA|\s+AN[OÓ]TESE|\s+COMUNIQUESE/i)[0]
+          .trim()
+          .slice(0, 80)
+      }
     }
   }
 
-  // Período genérico desde-hasta si faltan etiquetas
+  // Período genérico dd/mm/yyyy al dd/mm/yyyy
   if (!out.fecha_inicio || !out.fecha_termino) {
     const per =
       t.match(
@@ -154,28 +200,35 @@ function parseActoFromText(text, archivo) {
     }
   }
 
-  // JORNADA : 18 HORAS
+  // Horas: "26 HRS" / "JORNADA : 18 HORAS" / "Nº De Horas Cronológicas Semanales: 26"
   const h =
+    t.match(
+      /(?:N[°º]?\s*DE\s*)?HORAS?\s*CRONOL[OÓ]GICAS?\s*SEMANALES?\s*[:.]?\s*(\d{1,2})\s*(?:HRS?\.?|HORAS?)?/i
+    ) ||
     t.match(/JORNADA\s*[:.]?\s*(\d{1,2})\s*HORAS?/i) ||
-    t.match(/(\d{1,2})\s*(?:HORAS?\s*(?:CRONOL[OÓ]GICAS|PEDAG[OÓ]GICAS|SEMANALES)?|HRS?\.?)/i) ||
+    t.match(/(\d{1,2})\s*(?:HRS?\.?|HORAS?)(?:\s*CRONOL|\s*SEMANALES|\s*$|\s*[,.])/i) ||
     t.match(/(?:CARGA\s*HORARIA)[^\d]{0,20}(\d{1,2})/i)
   if (h) {
     const n = Number(h[1])
     if (n > 0 && n <= 44) out.horas = n
   }
 
+  // Preferir código de colegio (F-509 …) / Liceo; evitar "establecimiento educacional" del VISTOS
   const est =
+    t.match(/\b(F-?\d{2,4}\s+[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s.\-]{2,40}?)(?=\s+[A-Za-z]\)|\s+RAZ[OÓ]N|\s+FECHA\s+DE|\s+JORNADA|\s+NIVEL|\s+CALIDAD|\s+FIANZA|$)/i) ||
     t.match(
-      /ESTAB(?:\.|LECIMIENTO)?\s*(?:EDUCACIONAL)?\s*[:.]?\s*([A-Z0-9ÁÉÍÓÚÑ][A-Z0-9ÁÉÍÓÚÑ\s.\-]{2,60}?)(?=\s+RAZ[OÓ]N|\s+FECHA\s+DE|\s+FIANZA|\s+JORNADA|$)/i
+      /(?:^|\n|[A-Za-z]\))\s*ESTABLECIMIENTO\s*[:.]?\s*((?:F-?\d{2,4}|LICEO|COLEGIO|ESCUELA)[^.\n]{2,60}?)(?=\s+[A-Za-z]\)|\s+JORNADA|\s+NIVEL|\s+CALIDAD|\s+PER[IÍ]ODO|$)/i
     ) ||
-    t.match(/\b(F-?\d{2,4}\s+[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s.\-]{2,40}?)(?=\s+RAZ[OÓ]N|\s+FECHA\s+DE|\s+FIANZA|$)/i) ||
+    t.match(
+      /ESTAB(?:\.|LECIMIENTO)?\s*(?:EDUCACIONAL)?\s*[:.]?\s*((?:F-?\d{2,4}|LICEO|COLEGIO)[A-Z0-9ÁÉÍÓÚÑ\s.\-]{2,50}?)(?=\s+RAZ[OÓ]N|\s+FECHA\s+DE|\s+FIANZA|\s+JORNADA|$)/i
+    ) ||
     t.match(/\b(LICEO\s+[A-Z0-9ÁÉÍÓÚÑ][A-Z0-9ÁÉÍÓÚÑ\s.\-]{2,50}?)(?=\s+RAZ[OÓ]N|\s+FECHA\s+DE|$)/i)
   if (est) {
     out.establecimiento = est[1].replace(/\s+/g, ' ').trim().slice(0, 100)
   }
 
   if (!out.tipo_acto) {
-    if (/RESOLUC|REX/i.test(u)) out.tipo_acto = 'Resolución'
+    if (/RESOLUC|REX/i.test(u) || /RESOLUC|REX/i.test(String(archivo || ''))) out.tipo_acto = 'Resolución'
     else if (/DECRETO/i.test(u) || /DECRETO/i.test(String(archivo || ''))) out.tipo_acto = 'Decreto'
   }
 
@@ -186,4 +239,6 @@ module.exports = {
   parseActoFromText,
   normalizarOcr,
   ymd,
+  nDesdeNombreArchivo,
+  PARSER_VERSION,
 }
