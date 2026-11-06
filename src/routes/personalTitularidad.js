@@ -12,7 +12,7 @@ const { normalizeRutParts, formatearRut } = require('../lib/rutChileno')
 const { requireAccesoPersonal } = require('../lib/personalPermisos')
 const { etiquetaPeriodo } = require('../lib/personalLiquidacionParse')
 const { tipoDocumentalLabel } = require('../lib/personalDocTypes')
-const { extraerCamposDocumento, mapPool } = require('../lib/personalDecretoExtract')
+const { extraerCamposDocumento, mapPool, PARSER_VERSION } = require('../lib/personalDecretoExtract')
 
 const TIPOS_ACTO = new Set(['resolucion_nombramiento', 'consolidado_antiguo', 'contrato'])
 
@@ -114,8 +114,16 @@ router.get('/titularidad/datos', auth, async (req, res) => {
         const nFromName =
           (String(d.nombre_archivo || '').match(/_(\d{2,6})\.pdf$/i) || [])[1] || null
         const confianza = Number(x.confianza || 0)
+        const tieneTermino = !!(x.fecha_termino || x.fecha_termino_texto)
         const fidedigno =
-          confianza >= 50 && !!(x.fecha_inicio || (x.n_decreto && x.fecha_decreto && x.horas != null))
+          !!x.manual ||
+          (confianza >= 50 &&
+            !!x.n_decreto &&
+            !!x.fecha_decreto &&
+            !!x.fecha_inicio &&
+            tieneTermino &&
+            x.horas != null) ||
+          (confianza >= 50 && !!(x.fecha_inicio || (x.n_decreto && x.fecha_decreto && x.horas != null)))
         return {
           doc_id: d.id,
           tipo: labelTipo(d.tipo_documental, d.nombre_archivo, x.tipo_acto),
@@ -126,8 +134,11 @@ router.get('/titularidad/datos', auth, async (req, res) => {
           fecha_inicio: x.fecha_inicio || null,
           fecha_termino: x.fecha_termino || null,
           fecha_termino_texto: x.fecha_termino_texto || null,
+          duracion_dias: x.duracion_dias != null ? Number(x.duracion_dias) : null,
+          duracion_meses: x.duracion_meses != null ? Number(x.duracion_meses) : null,
           horas: x.horas != null ? x.horas : null,
-          establecimiento: x.establecimiento || f.ubicacion || null,
+          // Solo lo leído del PDF / carga manual (no ubicacion del funcionario)
+          establecimiento: x.establecimiento || null,
           fuente: d.nombre_archivo || 'PDF carpeta SIGEX',
           nombre_archivo: d.nombre_archivo,
           url_archivo: `/api/personal/funcionarios/${f.id}/documentos/${d.id}/archivo`,
@@ -135,6 +146,7 @@ router.get('/titularidad/datos', auth, async (req, res) => {
           plantilla: x.plantilla || null,
           confianza,
           fidedigno,
+          manual: !!x.manual,
           pages: x.pages || null,
           desde_cache: !!x.desde_cache,
           error_extraccion: x.error || null,
@@ -199,6 +211,130 @@ router.get('/titularidad/datos', auth, async (req, res) => {
   } catch (err) {
     console.error('[titularidad/datos]', err)
     res.status(500).json({ error: err.message || 'Error al consultar titularidad' })
+  }
+})
+
+/**
+ * PATCH /titularidad/decretos/:docId
+ * Corregí a mano N°, fechas, horas, establecimiento o término textual.
+ */
+router.patch('/titularidad/decretos/:docId', auth, async (req, res) => {
+  try {
+    if (!requireAccesoPersonal(req, res)) return
+
+    const docId = String(req.params.docId || '').trim()
+    if (!docId) return res.status(400).json({ error: 'docId requerido' })
+
+    const docR = await db.query(
+      `SELECT id, funcionario_id, nombre_archivo, extraccion_json
+       FROM personal_documentos WHERE id = $1 AND es_activo = TRUE`,
+      [docId]
+    )
+    if (!docR.rows.length) return res.status(404).json({ error: 'Documento no encontrado' })
+    const doc = docR.rows[0]
+
+    const body = req.body || {}
+    const iso = (v) => {
+      if (v == null || v === '') return null
+      const s = String(v).trim().slice(0, 10)
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+      const m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/)
+      if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`
+      return null
+    }
+
+    const prev = doc.extraccion_json && typeof doc.extraccion_json === 'object' ? doc.extraccion_json : {}
+    const n_decreto =
+      body.n_decreto != null && String(body.n_decreto).trim() !== ''
+        ? String(body.n_decreto).replace(/\D/g, '').replace(/^0+/, '') || String(body.n_decreto).trim()
+        : prev.n_decreto || null
+    const fecha_decreto = body.fecha_decreto !== undefined ? iso(body.fecha_decreto) : prev.fecha_decreto || null
+    const fecha_inicio = body.fecha_inicio !== undefined ? iso(body.fecha_inicio) : prev.fecha_inicio || null
+    let fecha_termino =
+      body.fecha_termino !== undefined ? iso(body.fecha_termino) : prev.fecha_termino || null
+    let fecha_termino_texto =
+      body.fecha_termino_texto !== undefined
+        ? body.fecha_termino_texto
+          ? String(body.fecha_termino_texto).trim().slice(0, 120)
+          : null
+        : prev.fecha_termino_texto || null
+    if (fecha_termino) fecha_termino_texto = null
+    if (fecha_termino_texto) fecha_termino = null
+
+    let horas = prev.horas != null ? Number(prev.horas) : null
+    if (body.horas !== undefined && body.horas !== null && body.horas !== '') {
+      const nH = Number(body.horas)
+      if (!Number.isFinite(nH) || nH < 1 || nH > 44) {
+        return res.status(400).json({ error: 'Horas debe ser un número entre 1 y 44' })
+      }
+      horas = nH
+    }
+
+    const establecimiento =
+      body.establecimiento !== undefined
+        ? body.establecimiento
+          ? String(body.establecimiento).trim().slice(0, 120)
+          : null
+        : prev.establecimiento || null
+
+    let duracion_dias = null
+    let duracion_meses = null
+    if (fecha_inicio && fecha_termino) {
+      const a = new Date(fecha_inicio + 'T12:00:00Z')
+      const b = new Date(fecha_termino + 'T12:00:00Z')
+      if (!Number.isNaN(a.getTime()) && !Number.isNaN(b.getTime()) && b >= a) {
+        duracion_dias = Math.round((b - a) / 86400000) + 1
+        duracion_meses =
+          (b.getUTCFullYear() - a.getUTCFullYear()) * 12 + (b.getUTCMonth() - a.getUTCMonth()) + 1
+      }
+    }
+
+    const completo =
+      !!n_decreto &&
+      !!fecha_decreto &&
+      !!fecha_inicio &&
+      !!(fecha_termino || fecha_termino_texto) &&
+      horas != null
+
+    const result = {
+      ...prev,
+      n_decreto,
+      fecha_decreto,
+      fecha_inicio,
+      fecha_termino,
+      fecha_termino_texto,
+      horas,
+      establecimiento,
+      duracion_dias,
+      duracion_meses,
+      tipo_acto: prev.tipo_acto || 'Decreto',
+      plantilla: prev.plantilla || 'manual',
+      confianza: completo ? 100 : 80,
+      metodo: 'manual',
+      manual: true,
+      manual_at: new Date().toISOString(),
+      manual_by: req.user?.login || req.user?.id || null,
+      parser_version: Math.max(Number(prev.parser_version) || 0, Number(PARSER_VERSION) || 1),
+      extracted_at: new Date().toISOString(),
+    }
+
+    await db.query(
+      `UPDATE personal_documentos
+       SET extraccion_json = $2::jsonb, extraccion_at = NOW()
+       WHERE id = $1`,
+      [docId, JSON.stringify(result)]
+    )
+
+    res.json({
+      ok: true,
+      doc_id: docId,
+      nombre_archivo: doc.nombre_archivo,
+      extraccion: result,
+      fidedigno: completo,
+    })
+  } catch (err) {
+    console.error('[titularidad/decretos PATCH]', err)
+    res.status(500).json({ error: err.message || 'Error al guardar' })
   }
 })
 

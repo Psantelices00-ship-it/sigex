@@ -188,6 +188,12 @@ async function extractTextFromPdfBuffer(buf, stamp) {
 
 async function extraerCamposDocumento(doc, { force = false } = {}) {
   const cached = doc.extraccion_json
+
+  // Carga manual: no pisar con OCR (salvo force=1)
+  if (cached && typeof cached === 'object' && cached.manual === true && !force) {
+    return { ...cached, desde_cache: true, manual: true }
+  }
+
   const cacheOk =
     cached &&
     typeof cached === 'object' &&
