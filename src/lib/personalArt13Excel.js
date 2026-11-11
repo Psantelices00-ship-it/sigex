@@ -12,19 +12,61 @@ const {
   normalizarParams,
 } = require('./personalArt13Calc');
 
+function normHeader(value) {
+  return String(value == null ? '' : value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 function findHeaderIndex(headerRow, predicates) {
   for (let i = 0; i < headerRow.length; i++) {
-    const h = String(headerRow[i] == null ? '' : headerRow[i])
-      .toLowerCase()
-      .replace(/\s+/g, ' ')
-      .trim();
-    if (predicates.some((p) => p(h))) return i;
+    const h = normHeader(headerRow[i])
+    if (predicates.some((p) => p(h))) return i
   }
-  return -1;
+  return -1
+}
+
+/** Índice de columna por código Hxxx (H001, H011, …), sin usar letra/posición Excel. */
+function findHaberIndex(headerRow, haber) {
+  const codigo = String(haber.codigo || '')
+    .toUpperCase()
+    .replace(/[^H0-9]/g, '')
+  if (codigo) {
+    const byCodigo = findHeaderIndex(headerRow, [
+      (h) => h === codigo.toLowerCase(),
+      (h) => h.startsWith(codigo.toLowerCase() + ' '),
+      (h) => new RegExp(`(^|\\b)${codigo.toLowerCase()}(\\b|\\s|$)`).test(h),
+    ])
+    if (byCodigo >= 0) return byCodigo
+  }
+
+  const etiqueta = normHeader(haber.etiqueta)
+  if (etiqueta) {
+    const byEtiqueta = findHeaderIndex(headerRow, [(h) => h === etiqueta || h.includes(etiqueta)])
+    if (byEtiqueta >= 0) return byEtiqueta
+  }
+
+  const aliases = Array.isArray(haber.alias) ? haber.alias : []
+  for (const alias of aliases) {
+    const a = normHeader(alias)
+    if (!a) continue
+    // Alias exacto o encabezado que termina/es igual al alias (evitar "movilizacion especial" ≠ "movilizacion")
+    const byAlias = findHeaderIndex(headerRow, [
+      (h) => h === a,
+      (h) => h.endsWith(' ' + a) || h.endsWith(a),
+      (h) => h === a || h.replace(/^h\d{3}\s+/, '') === a,
+    ])
+    if (byAlias >= 0) return byAlias
+  }
+
+  return -1
 }
 
 function buildIndexMap(headerRow) {
-  const byLetter = (letra) => letraAIndice(letra);
+  const byLetter = (letra) => letraAIndice(letra)
   const idx = {
     nombre: byLetter('A'),
     rut: byLetter('B'),
@@ -32,41 +74,35 @@ function buildIndexMap(headerRow) {
     establecimiento: byLetter('G'),
     jornada: byLetter('AE'),
     dias: byLetter('AW'),
-  };
+  }
 
-  const foundNombre = findHeaderIndex(headerRow, [(h) => h === 'nombre', (h) => h.includes('nombre_funcionario')]);
-  const foundRut = findHeaderIndex(headerRow, [(h) => h === 'rut']);
-  const foundPlanta = findHeaderIndex(headerRow, [(h) => h === 'planta']);
-  const foundJornada = findHeaderIndex(headerRow, [(h) => h === 'jornada', (h) => h.startsWith('jornada')]);
-  const foundEst = findHeaderIndex(headerRow, [(h) => h.startsWith('ubicaci'), (h) => h.includes('establec')]);
+  const foundNombre = findHeaderIndex(headerRow, [(h) => h === 'nombre', (h) => h.includes('nombre_funcionario')])
+  const foundRut = findHeaderIndex(headerRow, [(h) => h === 'rut'])
+  const foundPlanta = findHeaderIndex(headerRow, [(h) => h === 'planta'])
+  const foundJornada = findHeaderIndex(headerRow, [(h) => h === 'jornada', (h) => h.startsWith('jornada')])
+  const foundEst = findHeaderIndex(headerRow, [(h) => h.startsWith('ubicaci'), (h) => h.includes('establec')])
   const foundDias = findHeaderIndex(headerRow, [
     (h) => h === 'dias_trab',
     (h) => h.includes('dias_trab'),
-    (h) => h.includes('días trab'),
     (h) => h.includes('dias trab'),
-  ]);
+  ])
 
-  if (foundNombre >= 0) idx.nombre = foundNombre;
-  if (foundRut >= 0) idx.rut = foundRut;
-  if (foundPlanta >= 0) idx.planta = foundPlanta;
-  if (foundJornada >= 0) idx.jornada = foundJornada;
-  if (foundEst >= 0) idx.establecimiento = foundEst;
-  if (foundDias >= 0) idx.dias = foundDias;
+  if (foundNombre >= 0) idx.nombre = foundNombre
+  if (foundRut >= 0) idx.rut = foundRut
+  if (foundPlanta >= 0) idx.planta = foundPlanta
+  if (foundJornada >= 0) idx.jornada = foundJornada
+  if (foundEst >= 0) idx.establecimiento = foundEst
+  if (foundDias >= 0) idx.dias = foundDias
 
-  idx.haberes = HABERES_DEFAULT.map((h) => {
-    const byName = findHeaderIndex(headerRow, [
-      (hdr) => hdr.includes(h.etiqueta.toLowerCase()),
-      (hdr) => hdr.includes(h.clave),
-    ]);
-    return {
-      letra: h.letra,
-      clave: h.clave,
-      etiqueta: h.etiqueta,
-      index: byName >= 0 ? byName : letraAIndice(h.letra),
-    };
-  });
+  idx.haberes = HABERES_DEFAULT.map((h) => ({
+    codigo: h.codigo,
+    clave: h.clave,
+    etiqueta: h.etiqueta,
+    // -1 si no está en este maestro (monto 0). Nunca fallback a letra Excel.
+    index: findHaberIndex(headerRow, h),
+  }))
 
-  return idx;
+  return idx
 }
 
 function procesarMaestro(buffer, paramsInput) {
@@ -91,13 +127,13 @@ function procesarMaestro(buffer, paramsInput) {
     const plantaKey = planta || '(sin planta)';
     plantasCount[plantaKey] = (plantasCount[plantaKey] || 0) + 1;
 
-    const haberes = {};
-    let bruto = 0;
+    const haberes = {}
+    let bruto = 0
     idx.haberes.forEach((h) => {
-      const monto = roundExcel(toNumber(raw[h.index]), 0);
-      haberes[h.clave] = monto;
-      bruto += monto;
-    });
+      const monto = h.index >= 0 ? roundExcel(toNumber(raw[h.index]), 0) : 0
+      haberes[h.clave] = monto
+      bruto += monto
+    })
 
     const jornada = parseJornada(raw[idx.jornada]);
     const dias = parseDias(raw[idx.dias], params.diasMes);

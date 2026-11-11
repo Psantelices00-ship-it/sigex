@@ -13,14 +13,72 @@ const PARAMETROS_2026 = {
   diasMes: 30,
 };
 
+/**
+ * Haberes que componen el bruto Art. 13.
+ * Se localizan por código Hxxx (p.ej. H001), no por letra/posición de Excel:
+ * en algunos meses el maestro agrega columnas y las posiciones CE/CK/… se desplazan.
+ */
 const HABERES_DEFAULT = [
-  { letra: 'CE', clave: 'sueldos', etiqueta: 'H001 SUELDOS' },
-  { letra: 'CK', clave: 'movilizacion', etiqueta: 'H011 MOVILIZACION' },
-  { letra: 'CL', clave: 'colacion', etiqueta: 'H012 COLACION' },
-  { letra: 'CP', clave: 'respFuncion', etiqueta: 'H016 A.RESP.FUNCION(A.E.)' },
-  { letra: 'CT', clave: 'art7', etiqueta: 'H038 ART.7 L/19464' },
-  { letra: 'DE', clave: 'dificil', etiqueta: 'H073 D.DIFICIL (A.E.)' },
-  { letra: 'DK', clave: 'riesgo', etiqueta: 'H090 ASIG.DE RIESGO (A.E.)' },
+  {
+    codigo: 'H001',
+    clave: 'sueldos',
+    etiqueta: 'H001 SUELDOS',
+    alias: ['SUELDOS'],
+  },
+  {
+    codigo: 'H011',
+    clave: 'movilizacion',
+    etiqueta: 'H011 MOVILIZACION',
+    alias: ['MOVILIZACION', 'MOVILIZACIÓN'],
+  },
+  {
+    codigo: 'H012',
+    clave: 'colacion',
+    etiqueta: 'H012 COLACION',
+    alias: ['COLACION', 'COLACIÓN'],
+  },
+  {
+    codigo: 'H014',
+    clave: 'movilizacionEspecial',
+    etiqueta: 'H014 MOVILIZACION ESPECIAL',
+    alias: ['MOVILIZACION ESPECIAL', 'MOVILIZACIÓN ESPECIAL'],
+  },
+  {
+    codigo: 'H016',
+    clave: 'respFuncion',
+    etiqueta: 'H016 A.RESP.FUNCION(A.E.)',
+    alias: ['A.RESP.FUNCION', 'A.RESP.FUNCION(A.E.)', 'RESP.FUNCION'],
+  },
+  {
+    codigo: 'H038',
+    clave: 'art7',
+    etiqueta: 'H038 ART.7 L/19464',
+    alias: ['ART.7 L/19464', 'ART.7'],
+  },
+  {
+    codigo: 'H073',
+    clave: 'dificil',
+    etiqueta: 'H073 D.DIFICIL (A.E.)',
+    alias: ['D.DIFICIL', 'DIFICIL (A.E.)'],
+  },
+  {
+    codigo: 'H090',
+    clave: 'riesgo',
+    etiqueta: 'H090 ASIG.DE RIESGO (A.E.)',
+    alias: ['ASIG.DE RIESGO', 'ASIG. DE RIESGO'],
+  },
+  {
+    codigo: 'H125',
+    clave: 'visitasDomiciliarias',
+    etiqueta: 'H125 Visitas domiciliarias',
+    alias: ['VISITAS DOMICILIARIAS'],
+  },
+  {
+    codigo: 'H126',
+    clave: 'asigResponsa',
+    etiqueta: 'H126 Asig Responsa',
+    alias: ['ASIG RESPONSA', 'ASIG. RESPONSA', 'ASIGRESPONSA'],
+  },
 ];
 
 const PLANTAS_DOCENTE = [
