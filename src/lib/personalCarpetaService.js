@@ -71,6 +71,9 @@ async function docsResumenForFuncionario(funcionarioId, tipoFuncionario) {
     vencidos: obligatoriosActivos.filter((r) => r.estado === 'vencido').length,
     proximos_vencer: obligatoriosActivos.filter((r) => r.estado === 'proximo_vencer').length,
     consolidados_antiguos: activos.rows.filter((r) => r.tipo_documental === 'consolidado_antiguo').length,
+    regularizaciones_titularidad: activos.rows.filter(
+      (r) => r.tipo_documental === 'regularizacion_titularidad'
+    ).length,
     anexos: activos.rows.filter((r) => r.tipo_documental === 'anexo').length,
     total_documentos_activos: activos.rows.length,
   };
@@ -122,9 +125,13 @@ async function armarResumenCarpeta(funcionarioId) {
 
   const grupos = {
     obligatorios: documentos.filter(
-      (d) => d.tipo_documental !== 'anexo' && d.tipo_documental !== 'consolidado_antiguo'
+      (d) =>
+        d.tipo_documental !== 'anexo' &&
+        d.tipo_documental !== 'consolidado_antiguo' &&
+        d.tipo_documental !== 'regularizacion_titularidad'
     ),
     anexos: documentos.filter((d) => d.tipo_documental === 'anexo'),
+    regularizaciones: documentos.filter((d) => d.tipo_documental === 'regularizacion_titularidad'),
     consolidados: documentos.filter((d) => d.tipo_documental === 'consolidado_antiguo'),
   };
 
@@ -215,9 +222,10 @@ async function listarCarpetasResumen(filters = {}) {
            f.tipo_contrato, f.fecha_ingreso,
            COUNT(d.id) FILTER (WHERE d.es_activo) AS total_documentos,
            COUNT(d.id) FILTER (WHERE d.es_activo AND d.tipo_documental = 'consolidado_antiguo') AS consolidados,
+           COUNT(d.id) FILTER (WHERE d.es_activo AND d.tipo_documental = 'regularizacion_titularidad') AS regularizaciones,
            COUNT(d.id) FILTER (WHERE d.es_activo AND d.tipo_documental = 'anexo') AS anexos,
            COUNT(d.id) FILTER (
-             WHERE d.es_activo AND d.tipo_documental NOT IN ('anexo', 'consolidado_antiguo')
+             WHERE d.es_activo AND d.tipo_documental NOT IN ('anexo', 'consolidado_antiguo', 'regularizacion_titularidad')
            ) AS obligatorios_cargados
     FROM personal_funcionarios f
     LEFT JOIN personal_documentos d ON d.funcionario_id = f.id
@@ -265,6 +273,7 @@ async function listarCarpetasResumen(filters = {}) {
       resumen: {
         total_documentos: parseInt(f.total_documentos, 10) || 0,
         consolidados: parseInt(f.consolidados, 10) || 0,
+        regularizaciones: parseInt(f.regularizaciones, 10) || 0,
         anexos: parseInt(f.anexos, 10) || 0,
         obligatorios_cargados: obligatoriosCargados,
         total_obligatorios: totalObligatorios,

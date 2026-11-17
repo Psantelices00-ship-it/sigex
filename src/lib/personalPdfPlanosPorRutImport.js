@@ -3,7 +3,11 @@ const path = require('path');
 const db = require('../db');
 const { normalizeRutParts, formatearRut } = require('./rutChileno');
 const { guardarDocumentoPersonal, TIPO_CONSOLIDADO_IMPORT } = require('./personalDocumentoService');
-const { tipoPermitidoParaFuncionario } = require('./personalDocTypes');
+const {
+  isTipoDocumentalValido,
+  isTipoCargaManual,
+  tipoPermitidoParaFuncionario,
+} = require('./personalDocTypes');
 
 /**
  * Detecta tipo documental por palabras clave en el nombre del archivo.
@@ -17,6 +21,7 @@ function detectarTipoDocumental(filename) {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
 
+  if (/REGULARIZ/.test(u)) return 'regularizacion_titularidad';
   if (/RESOLUC|NOMBRAMIENTO/.test(u)) return 'resolucion_nombramiento';
   if (/ANEXO/.test(u)) return 'anexo';
   if (/CONTRATO/.test(u) && !/TERMINO/.test(u)) return 'contrato';
@@ -217,7 +222,14 @@ async function importarPdfPlanosPorRut(opts) {
     }
 
     let tipo = parsed.tipo_documental;
-    if (!tipoPermitidoParaFuncionario(tipo, funcionario.tipo_funcionario)) {
+    // Tipos de importación (consolidado / regularización) se respetan; solo se
+    // degrada a consolidado si el tipo manual no aplica al funcionario.
+    if (!isTipoDocumentalValido(tipo)) {
+      tipo = TIPO_CONSOLIDADO_IMPORT;
+    } else if (
+      isTipoCargaManual(tipo) &&
+      !tipoPermitidoParaFuncionario(tipo, funcionario.tipo_funcionario)
+    ) {
       tipo = TIPO_CONSOLIDADO_IMPORT;
     }
 

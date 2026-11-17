@@ -37,6 +37,13 @@ const PERSONAL_DOC_TIPOS_IMPORTACION = [
     solo_hombres: false,
     multiples_activos: true,
   },
+  {
+    key: 'regularizacion_titularidad',
+    label: 'Regularización titularidad',
+    requiere_vencimiento: false,
+    solo_hombres: false,
+    multiples_activos: true,
+  },
 ];
 
 const PERSONAL_DOC_TIPOS = [

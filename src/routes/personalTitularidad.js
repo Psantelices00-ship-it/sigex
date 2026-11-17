@@ -14,7 +14,12 @@ const { etiquetaPeriodo } = require('../lib/personalLiquidacionParse')
 const { tipoDocumentalLabel } = require('../lib/personalDocTypes')
 const { extraerCamposDocumento, mapPool, PARSER_VERSION } = require('../lib/personalDecretoExtract')
 
-const TIPOS_ACTO = new Set(['resolucion_nombramiento', 'consolidado_antiguo', 'contrato'])
+const TIPOS_ACTO = new Set([
+  'resolucion_nombramiento',
+  'consolidado_antiguo',
+  'contrato',
+  'regularizacion_titularidad',
+])
 
 function resolveRut(input) {
   const raw = String(input || '').trim()
@@ -26,13 +31,17 @@ function resolveRut(input) {
 function esDocActo(doc) {
   if (TIPOS_ACTO.has(doc.tipo_documental)) return true
   const u = String(doc.nombre_archivo || '').toUpperCase()
-  return /\bDECRETO\b/.test(u) || /RESOLUC|NOMBRAMIENTO|REX/.test(u)
+  return (
+    /\bDECRETO\b/.test(u) ||
+    /RESOLUC|NOMBRAMIENTO|REX|REGULARIZ/.test(u)
+  )
 }
 
 function labelTipo(tipo, nombre, parsedTipo) {
   if (parsedTipo) return parsedTipo
   const t = String(tipo || '')
   const u = String(nombre || '').toUpperCase()
+  if (t === 'regularizacion_titularidad' || /REGULARIZ/.test(u)) return 'Regularización titularidad'
   if (t === 'resolucion_nombramiento' || /RESOLUC|REX/.test(u)) return 'Resolución'
   if (t === 'consolidado_antiguo' || /\bDECRETO\b/.test(u)) return 'Decreto'
   if (t === 'contrato') return 'Contrato'
@@ -95,9 +104,12 @@ router.get('/titularidad/datos', auth, async (req, res) => {
     ])
 
     const docsActo = docsR.rows.filter(esDocActo)
-    // Limitar OCR en caliente: priorizar resoluciones y decretos con DECRETO en nombre
+    // Limitar OCR en caliente: priorizar regularización, resoluciones y decretos
     const docsOrden = [...docsActo].sort((a, b) => {
       const score = (d) =>
+        (d.tipo_documental === 'regularizacion_titularidad' || /REGULARIZ/i.test(d.nombre_archivo || '')
+          ? 0
+          : 3) +
         (d.tipo_documental === 'resolucion_nombramiento' ? 0 : 2) +
         (/\bDECRETO\b/i.test(d.nombre_archivo || '') ? 0 : 1)
       return score(a) - score(b)
