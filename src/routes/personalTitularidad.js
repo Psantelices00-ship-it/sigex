@@ -420,19 +420,26 @@ router.get('/titularidad/titulares', auth, async (req, res) => {
 
     const format = String(req.query?.format || '').toLowerCase()
     if (format === 'csv') {
-      const lines = ['nombre,rut,horas,tipo_contrato,ubicacion']
-      for (const r of filas) {
-        const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`
-        lines.push(
-          [esc(r.nombre), esc(r.rut), r.horas ?? '', esc(r.tipo_contrato), esc(r.ubicacion)].join(',')
-        )
+      // Separador ";" para que Excel (es-CL / LatAm) abra en columnas y no en una sola celda.
+      const sep = ';'
+      const esc = (v) => {
+        const s = String(v ?? '')
+        if (/[;"\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+        return s
       }
+      const lines = [
+        'nombre;rut;horas;tipo_contrato;ubicacion',
+        ...filas.map((r) =>
+          [esc(r.nombre), esc(r.rut), r.horas ?? '', esc(r.tipo_contrato), esc(r.ubicacion)].join(sep)
+        ),
+      ]
       res.setHeader('Content-Type', 'text/csv; charset=utf-8')
       res.setHeader(
         'Content-Disposition',
         'attachment; filename="titulares-docentes.csv"'
       )
-      return res.send('\uFEFF' + lines.join('\n'))
+      // BOM UTF-8 + hint de separador para Excel.
+      return res.send(`\uFEFFsep=${sep}\n` + lines.join('\n'))
     }
 
     res.json({
