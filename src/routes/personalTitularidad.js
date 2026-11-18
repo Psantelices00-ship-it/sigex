@@ -13,6 +13,7 @@ const { requireAccesoPersonal } = require('../lib/personalPermisos')
 const { etiquetaPeriodo } = require('../lib/personalLiquidacionParse')
 const { tipoDocumentalLabel } = require('../lib/personalDocTypes')
 const { extraerCamposDocumento, mapPool, PARSER_VERSION } = require('../lib/personalDecretoExtract')
+const { evaluarTitularidad28BisDesdeFicha } = require('../lib/evaluarDesignaciones21803')
 
 const TIPOS_ACTO = new Set([
   'resolucion_nombramiento',
@@ -352,75 +353,114 @@ router.patch('/titularidad/decretos/:docId', auth, async (req, res) => {
 
 /**
  * GET /titularidad/titulares
- * Listado de docentes ya titulares a la fecha: nombre, RUT, horas.
- * Horas: maestro remuneraciones (caché jornada) o decretos con horas.
+ * Listado de docentes que CUMPLEN Ley 21.803 (motor Excel / designaciones):
+ * nombre, RUT, horas a titularizar. No usa el tipo_contrato "TITULAR" del maestro.
  */
 router.get('/titularidad/titulares', auth, async (req, res) => {
   try {
     if (!requireAccesoPersonal(req, res)) return
 
-    const fs = require('fs')
-    const path = require('path')
-    let jornadaMap = {}
-    const cachePath = path.join(__dirname, '../../data/jornada-titulares-docentes.json')
-    if (fs.existsSync(cachePath)) {
-      try {
-        const cache = JSON.parse(fs.readFileSync(cachePath, 'utf8'))
-        jornadaMap = cache.por_rut || {}
-      } catch (_) {
-        /* ignore */
-      }
-    }
-
     const funcs = await db.query(
       `SELECT id, rut_normalizado, nombre_completo, tipo_contrato, planta, ubicacion, profesion
        FROM personal_funcionarios
        WHERE activo IS DISTINCT FROM FALSE
-         AND planta ILIKE '%DOCENTE%'
-         AND tipo_contrato ILIKE '%TITULAR%'
-         AND tipo_contrato NOT ILIKE '%REEMPLAZ%'
+         AND (
+           planta ILIKE '%DOCENTE%'
+           OR profesion ILIKE '%PROFESOR%'
+           OR profesion ILIKE '%DOCENTE%'
+           OR profesion ILIKE '%EDUCADOR%'
+         )
+         AND COALESCE(planta, '') NOT ILIKE '%ASISTENTE%'
+         AND COALESCE(planta, '') NOT ILIKE '%PARADOCENTE%'
+         AND COALESCE(planta, '') NOT ILIKE '%AUXILIAR%'
        ORDER BY nombre_completo`
     )
 
-    const horasDocs = await db.query(
-      `SELECT d.funcionario_id,
-              MAX(NULLIF(regexp_replace(COALESCE(d.extraccion_json->>'horas',''), '[^0-9]', '', 'g'), '')::int)
-                FILTER (WHERE d.es_activo) AS horas_doc
-       FROM personal_documentos d
-       WHERE d.funcionario_id = ANY($1::uuid[])
-         AND d.es_activo
-         AND COALESCE(d.extraccion_json->>'horas','') ~ '[0-9]'
-       GROUP BY d.funcionario_id`,
-      [funcs.rows.map((f) => f.id)]
-    ).catch(() => ({ rows: [] }))
+    const ids = funcs.rows.map((f) => f.id)
+    const docsR = ids.length
+      ? await db.query(
+          `SELECT d.funcionario_id, d.id AS doc_id, d.tipo_documental, d.nombre_archivo,
+                  d.extraccion_json
+           FROM personal_documentos d
+           WHERE d.funcionario_id = ANY($1::uuid[])
+             AND d.es_activo = TRUE
+             AND d.extraccion_json IS NOT NULL`,
+          [ids]
+        ).catch(() => ({ rows: [] }))
+      : { rows: [] }
 
-    const horasById = new Map(horasDocs.rows.map((r) => [String(r.funcionario_id), r.horas_doc]))
+    const docsByFunc = new Map()
+    for (const d of docsR.rows) {
+      const x = d.extraccion_json && typeof d.extraccion_json === 'object' ? d.extraccion_json : null
+      if (!x) continue
+      const fechaInicio = x.fecha_inicio || x.fecha_decreto || null
+      const fechaTermino = x.fecha_termino || null
+      if (!fechaInicio && !fechaTermino && !x.fecha_termino_texto) continue
+      const list = docsByFunc.get(String(d.funcionario_id)) || []
+      list.push({
+        doc_id: d.doc_id,
+        tipo_documental: d.tipo_documental,
+        nombre_archivo: d.nombre_archivo,
+        n_decreto: x.n_decreto || null,
+        fecha_decreto: x.fecha_decreto || null,
+        fecha_inicio: fechaInicio,
+        fecha_termino: fechaTermino,
+        fecha_termino_texto: x.fecha_termino_texto || null,
+        horas: x.horas != null && x.horas !== '' ? Number(x.horas) : null,
+        establecimiento: x.establecimiento || null,
+        tipo: x.tipo_acto || null,
+        fuente: 'sigex_decreto',
+      })
+      docsByFunc.set(String(d.funcionario_id), list)
+    }
 
-    const filas = funcs.rows.map((f) => {
-      const cache = jornadaMap[String(f.rut_normalizado || '').toUpperCase()] || null
-      const horasCache = cache?.jornada != null ? Number(cache.jornada) : null
-      const horasDoc = horasById.get(String(f.id))
-      const horas =
-        horasCache != null && Number.isFinite(horasCache)
-          ? horasCache
-          : horasDoc != null
-            ? Number(horasDoc)
-            : null
-      return {
+    const filas = []
+    let evaluados = 0
+    let sinDesignacion = 0
+    let noCumple = 0
+
+    for (const f of funcs.rows) {
+      const decretos = docsByFunc.get(String(f.id)) || []
+      if (!decretos.length) {
+        sinDesignacion += 1
+        continue
+      }
+      evaluados += 1
+      const ficha = {
         nombre: f.nombre_completo,
         rut: formatearRut(f.rut_normalizado),
         rut_normalizado: f.rut_normalizado,
-        horas,
+        planta: f.planta,
+        tipo_contrato: f.tipo_contrato,
+        profesion: f.profesion,
+        establecimiento: f.ubicacion,
+        decretos,
+      }
+      const ev = evaluarTitularidad28BisDesdeFicha(ficha)
+      const resultado = String(ev?.resultado || '')
+      if (!resultado.startsWith('CUMPLE')) {
+        noCumple += 1
+        continue
+      }
+      filas.push({
+        nombre: f.nombre_completo,
+        rut: formatearRut(f.rut_normalizado),
+        rut_normalizado: f.rut_normalizado,
+        horas: ev.horas_a_titularizar ?? ev.horas_a_reconocer ?? null,
+        resultado,
+        motivo: ev.motivo || null,
         tipo_contrato: f.tipo_contrato,
         planta: f.planta,
         ubicacion: f.ubicacion,
         profesion: f.profesion,
-      }
-    })
+        dias_computables_6: ev.dias_computables_6 ?? null,
+        designaciones_computables: ev.designaciones_computables ?? null,
+      })
+    }
 
     const format = String(req.query?.format || '').toLowerCase()
     if (format === 'csv') {
-      // Separador ";" para que Excel (es-CL / LatAm) abra en columnas y no en una sola celda.
+      // Separador ";" para que Excel (es-CL / LatAm) abra en columnas.
       const sep = ';'
       const esc = (v) => {
         const s = String(v ?? '')
@@ -428,24 +468,34 @@ router.get('/titularidad/titulares', auth, async (req, res) => {
         return s
       }
       const lines = [
-        'nombre;rut;horas;tipo_contrato;ubicacion',
+        'nombre;rut;horas;resultado;tipo_contrato;ubicacion',
         ...filas.map((r) =>
-          [esc(r.nombre), esc(r.rut), r.horas ?? '', esc(r.tipo_contrato), esc(r.ubicacion)].join(sep)
+          [
+            esc(r.nombre),
+            esc(r.rut),
+            r.horas ?? '',
+            esc(r.resultado),
+            esc(r.tipo_contrato),
+            esc(r.ubicacion),
+          ].join(sep)
         ),
       ]
       res.setHeader('Content-Type', 'text/csv; charset=utf-8')
       res.setHeader(
         'Content-Disposition',
-        'attachment; filename="titulares-docentes.csv"'
+        'attachment; filename="docentes-cumplen-titularidad-21803.csv"'
       )
-      // BOM UTF-8 + hint de separador para Excel.
       return res.send(`\uFEFFsep=${sep}\n` + lines.join('\n'))
     }
 
     res.json({
       total: filas.length,
+      evaluados,
+      sin_designacion: sinDesignacion,
+      no_cumple: noCumple,
       generados_en: new Date().toISOString(),
-      criterio: 'planta DOCENTE + tipo_contrato TITULAR (no reemplazo)',
+      criterio:
+        'Solo docentes que CUMPLEN Ley 21.803 (motor Excel designaciones R0/R1/R3). No usa tipo_contrato TITULAR del maestro.',
       filas,
     })
   } catch (err) {
