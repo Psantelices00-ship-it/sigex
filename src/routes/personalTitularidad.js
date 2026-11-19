@@ -17,6 +17,7 @@ const { evaluarTitularidad } = require('../lib/titularidad/evaluar')
 const { PARAMS_21803, PARAMS_21176 } = require('../lib/titularidad/params')
 const { cargarDatosFuncionario } = require('../lib/titularidad/cargar')
 const { cargarLoteEvaluacion } = require('../lib/titularidad/cargarLote')
+const { parseIso } = require('../lib/titularidad/timeline')
 
 const TIPOS_ACTO = new Set([
   'resolucion_nombramiento',
@@ -412,7 +413,9 @@ router.get('/titularidad/evaluacion', auth, async (req, res) => {
 
     const ley = String(req.query.ley || '21803').replace(/\./g, '')
     const modo = String(req.query.modo || (ley === '21176' ? 'inciso2' : 'transitorio'))
-    const fechaCorte = req.query.fechaCorte ? String(req.query.fechaCorte).slice(0, 10) : null
+    const fechaCorte = req.query.fechaCorte
+      ? parseIso(req.query.fechaCorte) || String(req.query.fechaCorte).slice(0, 10)
+      : null
     const anioPermanente = req.query.anio ? Number(req.query.anio) : undefined
     const filtroEstado = String(req.query.estado || '').toUpperCase()
     const q = String(req.query.q || '').trim().toLowerCase()
@@ -441,8 +444,25 @@ router.get('/titularidad/evaluacion', auth, async (req, res) => {
         if (!esTitular) continue
       }
 
-      const ev = evaluarTitularidad(ley, modo, fechaCorte, data, { anioPermanente })
-      resultados.push(ev)
+      try {
+        const ev = evaluarTitularidad(ley, modo, fechaCorte, data, { anioPermanente })
+        resultados.push(ev)
+      } catch (err) {
+        resultados.push({
+          ley,
+          modo,
+          fechaCorte,
+          nombre: data.nombre,
+          rut: data.rut,
+          estado: 'REVISAR',
+          motivos: [`Error al evaluar: ${err.message}`],
+          requisitos: [],
+          metricas: {},
+          esDirectivo: false,
+          horas: null,
+          establecimiento: data.establecimiento || null,
+        })
+      }
     }
 
     let filas = resultados
@@ -514,7 +534,9 @@ router.get('/titularidad/evaluacion/detalle', auth, async (req, res) => {
     if (!rutN) return res.status(400).json({ error: 'Indicá un RUT válido' })
     const ley = String(req.query.ley || '21803').replace(/\./g, '')
     const modo = String(req.query.modo || (ley === '21176' ? 'inciso2' : 'transitorio'))
-    const fechaCorte = req.query.fechaCorte ? String(req.query.fechaCorte).slice(0, 10) : null
+    const fechaCorte = req.query.fechaCorte
+      ? parseIso(req.query.fechaCorte) || String(req.query.fechaCorte).slice(0, 10)
+      : null
 
     const funcR = await db.query(
       `SELECT id, rut_normalizado, nombre_completo, tipo_contrato, planta, ubicacion, profesion
