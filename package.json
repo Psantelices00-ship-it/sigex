@@ -28,7 +28,8 @@
     "db:sql": "node scripts/run-sql-file.js",
     "personal:import-carpetas": "node scripts/importar-carpetas-personal.js",
     "personal:import-excel": "node scripts/importar-funcionarios-excel.js",
-    "personal:reconciliar-ruts": "node scripts/reconciliar-ruts-maestro.js"
+    "personal:reconciliar-ruts": "node scripts/reconciliar-ruts-maestro.js",
+    "test:titularidad": "node --test src/lib/titularidad/evaluar.test.js"
   },
   "dependencies": {
     "archiver": "^8.0.0",

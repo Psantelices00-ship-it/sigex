@@ -13,6 +13,10 @@ const { requireAccesoPersonal } = require('../lib/personalPermisos')
 const { etiquetaPeriodo } = require('../lib/personalLiquidacionParse')
 const { tipoDocumentalLabel } = require('../lib/personalDocTypes')
 const { extraerCamposDocumento, mapPool, PARSER_VERSION } = require('../lib/personalDecretoExtract')
+const { evaluarTitularidad } = require('../lib/titularidad/evaluar')
+const { PARAMS_21803, PARAMS_21176 } = require('../lib/titularidad/params')
+const { cargarDatosFuncionario } = require('../lib/titularidad/cargar')
+const { cargarLoteEvaluacion } = require('../lib/titularidad/cargarLote')
 
 const TIPOS_ACTO = new Set([
   'resolucion_nombramiento',
@@ -347,6 +351,185 @@ router.patch('/titularidad/decretos/:docId', auth, async (req, res) => {
   } catch (err) {
     console.error('[titularidad/decretos PATCH]', err)
     res.status(500).json({ error: err.message || 'Error al guardar' })
+  }
+})
+
+function csvEsc(v) {
+  const s = String(v ?? '')
+  if (/[;"\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+  return s
+}
+
+function toCsv(filas, detalle = false) {
+  const sep = ';'
+  const header = detalle
+    ? 'nombre;rut;horas;establecimiento;esDirectivo;estado;motivos;mesesContinuosMax;mesesTotalesVentana'
+    : 'nombre;rut;horas;establecimiento'
+  const lines = [
+    header,
+    ...filas.map((r) => {
+      if (detalle) {
+        return [
+          csvEsc(r.nombre),
+          csvEsc(r.rut),
+          r.horas ?? '',
+          csvEsc(r.establecimiento),
+          r.esDirectivo ? 'SI' : 'NO',
+          csvEsc(r.estado),
+          csvEsc((r.motivos || []).join(' | ')),
+          r.metricas?.mesesContinuosMax ?? '',
+          r.metricas?.mesesTotalesVentana ?? '',
+        ].join(sep)
+      }
+      return [csvEsc(r.nombre), csvEsc(r.rut), r.horas ?? '', csvEsc(r.establecimiento)].join(sep)
+    }),
+  ]
+  return `\uFEFFsep=${sep}\n` + lines.join('\n')
+}
+
+/**
+ * GET /titularidad/params — configuración de reglas (lectura)
+ */
+router.get('/titularidad/params', auth, async (req, res) => {
+  try {
+    if (!requireAccesoPersonal(req, res)) return
+    res.json({
+      '21803': PARAMS_21803,
+      '21176': PARAMS_21176,
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+/**
+ * GET /titularidad/evaluacion?ley=21803&modo=transitorio&fechaCorte=2025-07-31
+ * Query: estado, q (nombre/rut), establecimiento, format=csv|csv_detalle
+ */
+router.get('/titularidad/evaluacion', auth, async (req, res) => {
+  try {
+    if (!requireAccesoPersonal(req, res)) return
+
+    const ley = String(req.query.ley || '21803').replace(/\./g, '')
+    const modo = String(req.query.modo || (ley === '21176' ? 'inciso2' : 'transitorio'))
+    const fechaCorte = req.query.fechaCorte ? String(req.query.fechaCorte).slice(0, 10) : null
+    const anioPermanente = req.query.anio ? Number(req.query.anio) : undefined
+    const filtroEstado = String(req.query.estado || '').toUpperCase()
+    const q = String(req.query.q || '').trim().toLowerCase()
+    const estFiltro = String(req.query.establecimiento || '').trim().toLowerCase()
+    const format = String(req.query.format || '').toLowerCase()
+
+    const lote = await cargarLoteEvaluacion()
+    const resultados = []
+
+    for (const data of lote) {
+      if (ley === '21803') {
+        const cal = String(data.tipoContratoFicha || '').toUpperCase()
+        if (/TITULAR/.test(cal) && !/CONTRATA|EXTENSION|REEMPLAZ/.test(cal)) {
+          const tieneContrata = (data.periodos || []).some((p) => {
+            const c = String(p.calidad || '').toUpperCase()
+            return /CONTRATA|EXTENSION|REEMPLAZ/.test(c)
+          })
+          if (!tieneContrata) continue
+        }
+      }
+      if (ley === '21176') {
+        const cal = String(data.tipoContratoFicha || '').toUpperCase()
+        const esTitular =
+          /TITULAR/.test(cal) ||
+          (data.periodos || []).some((p) => /TITULAR/i.test(String(p.calidad || '')))
+        if (!esTitular) continue
+      }
+
+      const ev = evaluarTitularidad(ley, modo, fechaCorte, data, { anioPermanente })
+      resultados.push(ev)
+    }
+
+    let filas = resultados
+    if (filtroEstado) {
+      filas = filas.filter((r) => String(r.estado).toUpperCase().startsWith(filtroEstado))
+    }
+    if (q) {
+      filas = filas.filter(
+        (r) =>
+          String(r.nombre || '').toLowerCase().includes(q) ||
+          String(r.rut || '').toLowerCase().includes(q)
+      )
+    }
+    if (estFiltro) {
+      filas = filas.filter((r) => String(r.establecimiento || '').toLowerCase().includes(estFiltro))
+    }
+
+    const resumen = {
+      total: filas.length,
+      cumple: filas.filter((r) => r.estado === 'CUMPLE').length,
+      no_cumple: filas.filter((r) => r.estado === 'NO CUMPLE').length,
+      revisar: filas.filter((r) => r.estado === 'REVISAR').length,
+    }
+
+    if (format === 'csv' || format === 'csv_detalle') {
+      const soloCumple = format === 'csv' ? filas.filter((r) => r.estado === 'CUMPLE') : filas
+      const corte = filas[0]?.fechaCorte || fechaCorte || 'sin-corte'
+      const fname =
+        format === 'csv_detalle'
+          ? `titularidad_ley${ley}_${modo}_${corte}_detalle.csv`
+          : `titularidad_ley${ley}_${modo}_${corte}.csv`
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+      res.setHeader('Content-Disposition', `attachment; filename="${fname}"`)
+      return res.send(toCsv(soloCumple, format === 'csv_detalle'))
+    }
+
+    res.json({
+      ley,
+      modo,
+      fechaCorte: filas[0]?.fechaCorte || fechaCorte,
+      resumen,
+      generados_en: new Date().toISOString(),
+      filas: filas.map((r) => ({
+        nombre: r.nombre,
+        rut: r.rut,
+        horas: r.horas,
+        establecimiento: r.establecimiento,
+        esDirectivo: r.esDirectivo,
+        estado: r.estado,
+        motivos: r.motivos,
+        metricas: r.metricas,
+        requisitos: r.requisitos,
+        // timeline solo si se pide detalle de uno — omitir en listado para peso
+      })),
+    })
+  } catch (err) {
+    console.error('[titularidad/evaluacion]', err)
+    res.status(500).json({ error: err.message || 'Error al evaluar' })
+  }
+})
+
+/**
+ * GET /titularidad/evaluacion/:rut — detalle con timeline
+ */
+router.get('/titularidad/evaluacion/detalle', auth, async (req, res) => {
+  try {
+    if (!requireAccesoPersonal(req, res)) return
+    const rutN = resolveRut(req.query?.rut)
+    if (!rutN) return res.status(400).json({ error: 'Indicá un RUT válido' })
+    const ley = String(req.query.ley || '21803').replace(/\./g, '')
+    const modo = String(req.query.modo || (ley === '21176' ? 'inciso2' : 'transitorio'))
+    const fechaCorte = req.query.fechaCorte ? String(req.query.fechaCorte).slice(0, 10) : null
+
+    const funcR = await db.query(
+      `SELECT id, rut_normalizado, nombre_completo, tipo_contrato, planta, ubicacion, profesion
+       FROM personal_funcionarios WHERE rut_normalizado = $1`,
+      [rutN]
+    )
+    if (!funcR.rows.length) return res.status(404).json({ error: 'Funcionario no encontrado' })
+    const data = await cargarDatosFuncionario(funcR.rows[0])
+    const ev = evaluarTitularidad(ley, modo, fechaCorte, data, {
+      anioPermanente: req.query.anio ? Number(req.query.anio) : undefined,
+    })
+    res.json(ev)
+  } catch (err) {
+    console.error('[titularidad/evaluacion/detalle]', err)
+    res.status(500).json({ error: err.message || 'Error al evaluar' })
   }
 })
 
