@@ -50,6 +50,24 @@ function evaluar21803(data, modo = 'transitorio', fechaCorte, opts = {}) {
   }))
 
   const win = ventanaHasta(params.fechaCorte, params.ventanaAnios)
+  if (!win) {
+    return {
+      ley: '21803',
+      modo: params.modo,
+      fechaCorte: params.fechaCorte,
+      nombre: data.nombre || null,
+      rut: data.rut || null,
+      estado: 'REVISAR',
+      motivos: [`Fecha de corte inválida: ${params.fechaCorte || '(vacía)'}`],
+      requisitos: [],
+      metricas: {},
+      esDirectivo: false,
+      horas: null,
+      establecimiento: data.establecimiento || null,
+      timeline: [],
+      params,
+    }
+  }
   const mesesMap = expandirMeses(periodosNorm, liqSet, {
     incluirPeriodosSostenedorAnterior: params.incluirPeriodosSostenedorAnterior,
     contarReemplazos: params.contarReemplazos,
@@ -192,6 +210,24 @@ function evaluar21176(data, modo = 'inciso2', fechaCorte, opts = {}) {
 
   const winAnios = Math.ceil(params.mesesDiscontinuosMin / 12) + 2
   const win = ventanaHasta(params.fechaCorte, winAnios)
+  if (!win) {
+    return {
+      ley: '21176',
+      modo: params.modo,
+      fechaCorte: params.fechaCorte,
+      nombre: data.nombre || null,
+      rut: data.rut || null,
+      estado: 'REVISAR',
+      motivos: [`Fecha de corte inválida: ${params.fechaCorte || '(vacía)'}`],
+      requisitos: [],
+      metricas: {},
+      esDirectivo: false,
+      horas: null,
+      establecimiento: data.establecimiento || null,
+      timeline: [],
+      params,
+    }
+  }
   const mesesMap = expandirMeses(extensiones, liqSet, {
     incluirPeriodosSostenedorAnterior: params.incluirPeriodosSostenedorAnterior,
     contarReemplazos: true,

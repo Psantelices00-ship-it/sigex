@@ -5,11 +5,30 @@
 
 function parseIso(d) {
   if (!d) return null
-  if (d instanceof Date && !Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10)
-  const s = String(d).trim().slice(0, 10)
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
-  const m = String(d).trim().match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/)
-  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`
+  if (d instanceof Date && !Number.isNaN(d.getTime())) {
+    // Usar componentes locales/UTC consistentes vía ISO
+    return d.toISOString().slice(0, 10)
+  }
+  const raw = String(d).trim()
+  // Postgres / JSON a veces manda "2025-07-31T03:00:00.000Z"
+  const isoPref = raw.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (isoPref) {
+    const y = Number(isoPref[1])
+    const m = Number(isoPref[2])
+    const day = Number(isoPref[3])
+    if (m < 1 || m > 12 || day < 1 || day > 31) return null
+    const s = `${isoPref[1]}-${isoPref[2]}-${isoPref[3]}`
+    const dt = new Date(`${s}T12:00:00`)
+    if (Number.isNaN(dt.getTime())) return null
+    // rechazar overflow (ej. 2025-02-31 → mar)
+    if (dt.getFullYear() !== y || dt.getMonth() + 1 !== m || dt.getDate() !== day) return null
+    return s
+  }
+  const m = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/)
+  if (m) {
+    const s = `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`
+    return parseIso(s)
+  }
   return null
 }
 
@@ -130,10 +149,13 @@ function expandirMeses(periodos, liquidacionesYmSet, opts = {}) {
 
     const a0 = toDate(ini)
     const a1 = toDate(fin)
+    if (!a0 || !a1) continue
     let y = a0.getFullYear()
     let m = a0.getMonth() + 1
     const endY = a1.getFullYear()
     const endM = a1.getMonth() + 1
+    // Guardrail: periodos absurdamente largos (datos corruptos)
+    if ((endY - y) * 12 + (endM - m) > 1200) continue
     while (y < endY || (y === endY && m <= endM)) {
       const ym = ymKey(y, m)
       touch(ym, {
@@ -179,11 +201,22 @@ function mesCuentaComoServido(mes, criterioMesParcial = 'contrato_y_liquidacion'
 function metricasContinuidad(mesesMap, desdeYm, hastaYm, opts = {}) {
   const { criterioMesParcial = 'contrato_y_liquidacion', exigirLiquidacion = true } = opts
 
+  if (!desdeYm || !hastaYm || String(desdeYm) > String(hastaYm)) {
+    return {
+      mesesContinuosMax: 0,
+      mesesTotalesVentana: 0,
+      cubreUltimos24Meses: false,
+      timeline: [],
+    }
+  }
+
   const keys = []
   let cur = desdeYm
-  while (cur <= hastaYm) {
+  let guard = 0
+  while (cur <= hastaYm && guard < 240) {
     keys.push(cur)
     cur = shiftYm(cur, 1)
+    guard += 1
   }
 
   const servido = keys.map((ym) => {

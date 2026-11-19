@@ -4,7 +4,7 @@
 
 const db = require('../../db')
 const { formatearRut } = require('../rutChileno')
-const { clasificarCalidad } = require('./timeline')
+const { clasificarCalidad, parseIso } = require('./timeline')
 const { periodoDesdeExtraccion } = require('./cargar')
 
 async function cargarLoteEvaluacion() {
@@ -120,15 +120,19 @@ async function cargarLoteEvaluacion() {
     const maestro = maestroByFunc.get(String(f.id)) || maestroByRut.get(f.rut_normalizado) || null
     const periodosMaestro = []
     if (maestro && (maestro.fecha_documento || maestro.fecha_ingreso)) {
-      periodosMaestro.push({
-        inicio: String(maestro.fecha_documento || maestro.fecha_ingreso).slice(0, 10),
-        termino: maestro.fecha_fin ? String(maestro.fecha_fin).slice(0, 10) : null,
-        calidad: maestro.tipo_contrato || 'CONTRATA',
-        horas: null,
-        establecimiento: maestro.ubicacion || f.ubicacion,
-        mismoSostenedor: true,
-        fuente: 'maestro',
-      })
+      const inicioM = parseIso(maestro.fecha_documento || maestro.fecha_ingreso)
+      const terminoM = parseIso(maestro.fecha_fin)
+      if (inicioM) {
+        periodosMaestro.push({
+          inicio: inicioM,
+          termino: terminoM,
+          calidad: maestro.tipo_contrato || 'CONTRATA',
+          horas: null,
+          establecimiento: maestro.ubicacion || f.ubicacion,
+          mismoSostenedor: true,
+          fuente: 'maestro',
+        })
+      }
     }
     const periodos = [...periodosDocs, ...periodosMaestro]
     const liqSet = new Set([
