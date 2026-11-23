@@ -15,13 +15,15 @@ const CARGOS_DIRECTIVOS_DEFAULT = [
 
 const PARAMS_21803 = {
   ley: '21803',
-  version: '2026-11-19',
+  version: '2026-11-23',
   modos: {
     transitorio: {
       id: 'transitorio',
       label: 'Art. 41 transitorio (por única vez)',
       fechaCorte: '2025-07-31',
       vigenciaTitularidad: '2026-03-01',
+      // Primer día hábil de marzo 2026 = 02-03-2026 (1 fue domingo)
+      fechaVerificacionVigencia: '2026-03-02',
       exigeConcurso: false,
     },
     permanente: {
