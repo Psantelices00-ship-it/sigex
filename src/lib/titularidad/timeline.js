@@ -135,11 +135,18 @@ function expandirMeses(periodos, liquidacionesYmSet, opts = {}) {
     meses.set(ym, cur)
   }
 
-  for (const p of periodos || []) {
+  const lista = periodos || []
+  // Tope para periodos abiertos: no inventar cobertura indefinida en el mapa mensual.
+  const hastaExpansión = opts.hastaIso || null
+  for (const p of lista) {
     if (p.mismoSostenedor === false && !incluirPeriodosSostenedorAnterior) continue
     const ini = parseIso(p.inicio)
     let fin = parseIso(p.termino)
     if (!ini) continue
+    if (!fin) {
+      // Abierto: cortar ante el siguiente inicio (mismo criterio que continuidadPorDias)
+      fin = terminoEfectivo(p, lista, hastaExpansión || ini)
+    }
     if (!fin) fin = ini
     if (fin < ini) continue
 
@@ -274,26 +281,229 @@ function metricasContinuidad(mesesMap, desdeYm, hastaYm, opts = {}) {
   }
 }
 
-function horasVigentesEnCorte(periodos, fechaCorte, filtroCalidadFn) {
+/**
+ * Horas a contrata vigentes al corte.
+ * No suma designaciones solapadas/duplicadas: por cada calidad toma el máximo
+ * de un solo acto vigente; luego suma calidades distintas (p. ej. contrata + extensión).
+ * Tope legal informativo: 44 h.
+ */
+function horasVigentesEnCorte(periodos, fechaCorte, filtroCalidadFn, opts = {}) {
   const corte = parseIso(fechaCorte)
-  if (!corte) return { horas: 0, establecimientos: [] }
-  let horas = 0
+  const tope = opts.topeHoras != null ? Number(opts.topeHoras) : 44
+  if (!corte) return { horas: 0, establecimientos: [], actos: [] }
+  const lista = periodos || []
+  // Por calidad: un solo acto vigente (el de inicio más reciente al corte).
+  const porCalidad = new Map()
   const est = new Set()
-  for (const p of periodos || []) {
+  for (const p of lista) {
     const ini = parseIso(p.inicio)
-    let fin = parseIso(p.termino) || corte
-    if (!ini) continue
+    const fin = terminoEfectivo(p, lista, corte)
+    if (!ini || !fin) continue
     if (ini > corte || fin < corte) continue
     const cal = clasificarCalidad(p.calidad)
     if (filtroCalidadFn && !filtroCalidadFn(cal, p)) continue
-    if (Number.isFinite(Number(p.horas))) horas += Number(p.horas)
+    const h = Number.isFinite(Number(p.horas)) ? Number(p.horas) : null
+    if (h == null || h <= 0) continue
     if (p.establecimiento) est.add(p.establecimiento)
+    const prev = porCalidad.get(cal)
+    if (!prev || ini > prev.inicio || (ini === prev.inicio && h > prev.horas)) {
+      porCalidad.set(cal, {
+        horas: h,
+        establecimiento: p.establecimiento || null,
+        inicio: ini,
+        termino: fin,
+        fuente: p.fuente || null,
+        calidad: cal,
+      })
+    }
   }
-  return { horas, establecimientos: [...est] }
+  const actos = [...porCalidad.values()]
+  let horas = actos.reduce((a, x) => a + x.horas, 0)
+  if (Number.isFinite(tope) && horas > tope) horas = tope
+  return { horas, establecimientos: [...est], actos }
+}
+
+/** Primer día hábil de marzo del año (si 1=sáb/dom → lunes). */
+function primerDiaHabilMarzo(anio) {
+  const d = new Date(`${anio}-03-01T12:00:00`)
+  const dow = d.getDay() // 0=dom, 6=sáb
+  if (dow === 6) d.setDate(d.getDate() + 2)
+  else if (dow === 0) d.setDate(d.getDate() + 1)
+  return d.toISOString().slice(0, 10)
+}
+
+function addDaysIso(iso, n) {
+  const d = toDate(iso)
+  if (!d) return null
+  d.setDate(d.getDate() + n)
+  return d.toISOString().slice(0, 10)
+}
+
+function daysBetween(aIso, bIso) {
+  const a = toDate(aIso)
+  const b = toDate(bIso)
+  if (!a || !b) return null
+  return Math.round((b - a) / 86400000)
+}
+
+/**
+ * Termino efectivo de un periodo.
+ * Si no tiene fecha de término, no se proyecta hasta el corte a ciegas:
+ * se corta el día anterior al siguiente periodo que empieza después
+ * (evita que filas abiertas del consolidado tapen huecos reales de marzo).
+ * Si no hay sucesor, se asume vigente hasta `hastaIso`.
+ */
+function terminoEfectivo(p, periodos, hastaIso) {
+  const explicit = parseIso(p?.termino)
+  if (explicit) return explicit
+  const ini = parseIso(p?.inicio)
+  const hasta = parseIso(hastaIso)
+  if (!ini) return null
+  let nextStart = null
+  for (const o of periodos || []) {
+    if (o === p) continue
+    const oi = parseIso(o.inicio)
+    if (!oi || oi <= ini) continue
+    if (!nextStart || oi < nextStart) nextStart = oi
+  }
+  if (nextStart) {
+    const cap = addDaysIso(nextStart, -1)
+    if (!cap) return hasta
+    if (hasta && cap > hasta) return hasta
+    return cap
+  }
+  return hasta || null
+}
+
+/**
+ * Continuidad día a día entre desdeIso y hastaIso (inclusive).
+ * Receso ene-feb no rompe si hay cobertura hasta dic y recontratación
+ * al primer día hábil de marzo del año siguiente (o antes).
+ * toleranciaBrechaDias: huecos <= N días no rompen (fuera de ene-feb).
+ */
+function continuidadPorDias(periodos, desdeIso, hastaIso, opts = {}) {
+  const {
+    toleranciaBrechaDias = 0,
+    contarReemplazos = true,
+    contarHorasExtension = true,
+    incluirPeriodosSostenedorAnterior = false,
+  } = opts
+
+  const desde = parseIso(desdeIso)
+  const hasta = parseIso(hastaIso)
+  if (!desde || !hasta || hasta < desde) {
+    return { ok: false, huecos: ['ventana inválida'], inicioCadena: null, diasCubiertos: 0 }
+  }
+
+  const lista = periodos || []
+  const segs = []
+  for (const p of lista) {
+    if (p.mismoSostenedor === false && !incluirPeriodosSostenedorAnterior) continue
+    const cal = clasificarCalidad(p.calidad)
+    if (cal === 'reemplazo' && !contarReemplazos) continue
+    if (cal === 'extension' && !contarHorasExtension) continue
+    if (cal === 'titular') continue
+    const ini = parseIso(p.inicio)
+    const fin = terminoEfectivo(p, lista, hasta)
+    if (!ini || !fin) continue
+    if (fin < ini) continue
+    const a = ini < desde ? desde : ini
+    const b = fin > hasta ? hasta : fin
+    if (b < a) continue
+    segs.push({ inicio: a, termino: b })
+  }
+  segs.sort((x, y) => x.inicio.localeCompare(y.inicio) || x.termino.localeCompare(y.termino))
+
+  // Merge overlapping/adjacent within tolerancia
+  const merged = []
+  for (const s of segs) {
+    if (!merged.length) {
+      merged.push({ ...s })
+      continue
+    }
+    const last = merged[merged.length - 1]
+    const gap = daysBetween(last.termino, s.inicio)
+    // gap=1 means next day (continuous); gap=0 overlap/same day
+    if (gap != null && gap <= 1 + Number(toleranciaBrechaDias || 0)) {
+      if (s.termino > last.termino) last.termino = s.termino
+      continue
+    }
+    // Receso ene-feb: si el siguiente arranca a más tardar el primer día hábil de marzo.
+    const iniNext = toDate(s.inicio)
+    if (iniNext) {
+      const anioMarzo = iniNext.getFullYear()
+      const habilMarzo = primerDiaHabilMarzo(anioMarzo)
+      const finDic = `${anioMarzo - 1}-12-31`
+      const lastEnDic =
+        last.termino >= `${anioMarzo - 1}-12-01` && last.termino <= finDic
+      const lastEnEneFeb =
+        last.termino >= `${anioMarzo}-01-01` && last.termino <= `${anioMarzo}-02-29`
+      if ((lastEnDic || lastEnEneFeb) && s.inicio <= habilMarzo) {
+        if (s.termino > last.termino) last.termino = s.termino
+        continue
+      }
+    }
+    merged.push({ ...s })
+  }
+
+  const huecos = []
+  // Must start covering `desde` (or first business day of March if desde is that)
+  if (!merged.length) {
+    return { ok: false, huecos: [`Sin cobertura ${desde} → ${hasta}`], inicioCadena: null, diasCubiertos: 0 }
+  }
+  if (merged[0].inicio > desde) {
+    const habil = desde.slice(5, 7) === '03' ? primerDiaHabilMarzo(Number(desde.slice(0, 4))) : null
+    if (!(habil && merged[0].inicio <= habil && desde <= habil)) {
+      huecos.push(`Inicio de cadena ${merged[0].inicio} posterior a ${desde}`)
+    }
+  }
+  for (let i = 1; i < merged.length; i++) {
+    const prev = merged[i - 1]
+    const cur = merged[i]
+    const gap = daysBetween(prev.termino, cur.inicio)
+    if (gap != null && gap > 1 + Number(toleranciaBrechaDias || 0)) {
+      huecos.push(`Hueco ${addDaysIso(prev.termino, 1)} → ${addDaysIso(cur.inicio, -1)} (${gap - 1} días)`)
+    }
+  }
+  if (merged[merged.length - 1].termino < hasta) {
+    huecos.push(`Cobertura termina ${merged[merged.length - 1].termino} antes del corte ${hasta}`)
+  }
+
+  let diasCubiertos = 0
+  for (const s of merged) {
+    const d = daysBetween(s.inicio, s.termino)
+    if (d != null) diasCubiertos += d + 1
+  }
+
+  return {
+    ok: huecos.length === 0,
+    huecos,
+    inicioCadena: merged[0]?.inicio || null,
+    diasCubiertos,
+    segmentos: merged,
+  }
+}
+
+/** ¿Algún periodo (contrata/reemplazo/extensión) cubre la fecha? */
+function cubreFecha(periodos, fechaIso, opts = {}) {
+  const f = parseIso(fechaIso)
+  if (!f) return false
+  const lista = periodos || []
+  for (const p of lista) {
+    if (p.mismoSostenedor === false && !opts.incluirPeriodosSostenedorAnterior) continue
+    const cal = clasificarCalidad(p.calidad)
+    if (cal === 'titular' && opts.soloContrata) continue
+    const ini = parseIso(p.inicio)
+    const fin = terminoEfectivo(p, lista, f)
+    if (!ini || !fin) continue
+    if (ini <= f && fin >= f) return true
+  }
+  return false
 }
 
 module.exports = {
   parseIso,
+  toDate,
   ymKey,
   shiftYm,
   ventanaHasta,
@@ -303,4 +513,10 @@ module.exports = {
   metricasContinuidad,
   horasVigentesEnCorte,
   monthsBetweenInclusive,
+  primerDiaHabilMarzo,
+  continuidadPorDias,
+  cubreFecha,
+  addDaysIso,
+  daysBetween,
+  terminoEfectivo,
 }
