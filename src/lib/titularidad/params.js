@@ -15,7 +15,7 @@ const CARGOS_DIRECTIVOS_DEFAULT = [
 
 const PARAMS_21803 = {
   ley: '21803',
-  version: '2026-11-23',
+  version: '2026-11-24',
   modos: {
     transitorio: {
       id: 'transitorio',

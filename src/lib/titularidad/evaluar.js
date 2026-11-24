@@ -15,6 +15,8 @@ const {
   primerDiaHabilMarzo,
   continuidadPorDias,
   cubreFecha,
+  actosQueCubren,
+  iniciosTardiosMarzo,
   addDaysIso,
   terminoEfectivo,
 } = require('./timeline')
@@ -40,9 +42,10 @@ function evaluar21803(data, modo = 'transitorio', fechaCorte, opts = {}) {
   const hayLiq = liqSet.size > 0
 
   const periodosRaw = data.periodos || []
+  // REVISAR solo si no hay ni decretos/periodos ni liquidaciones.
+  // Si vienen periodos externos (p. ej. planilla) se evalúan aunque falte ficha SIGEX.
   const sinAntecedentes =
-    data.sinAntecedentesSigex === true ||
-    (periodosRaw.length === 0 && !hayLiq && !data.forzarEvaluacion)
+    periodosRaw.length === 0 && !hayLiq && !data.forzarEvaluacion
 
   if (sinAntecedentes) {
     return {
@@ -53,9 +56,9 @@ function evaluar21803(data, modo = 'transitorio', fechaCorte, opts = {}) {
       nombre: data.nombre || null,
       rut: data.rut || null,
       estado: 'REVISAR',
-      motivos: ['Sin antecedentes en SIGEX (sin designaciones ni liquidaciones). Pendiente de carga; no se rechaza.'],
+      motivos: ['Sin antecedentes (sin designaciones/decretos ni liquidaciones). Pendiente de carga.'],
       requisitos: [
-        req('antecedentes', 'Antecedentes cargados en SIGEX', false, 'Sin designaciones ni liquidaciones'),
+        req('antecedentes', 'Antecedentes de contrato o liquidación', false, 'Sin designaciones ni liquidaciones'),
       ],
       metricas: {},
       esDirectivo: false,
@@ -114,20 +117,33 @@ function evaluar21803(data, modo = 'transitorio', fechaCorte, opts = {}) {
   })
 
   // Continuidad reciente: día a día en los últimos 2 años hasta el corte.
-  // Recontratación escolar solo no rompe si arranca a más tardar el 1.er día hábil de marzo.
+  // Receso ene-feb solo con art. 41 bis; periodos abiertos no tapan huecos.
   const inicio24 = addDaysIso(params.fechaCorte, - (365 * 2) + 1) || params.fechaCorte
-  const cont24 = continuidadPorDias(periodosNorm, inicio24, params.fechaCorte, {
+  const contOpts = {
     toleranciaBrechaDias: params.toleranciaBrechaDias || 0,
     contarReemplazos: params.contarReemplazos,
     contarHorasExtension: params.contarHorasExtension,
     incluirPeriodosSostenedorAnterior: params.incluirPeriodosSostenedorAnterior,
-  })
+  }
+  const cont24 = continuidadPorDias(periodosNorm, inicio24, params.fechaCorte, contOpts)
 
+  // Inicios tardíos de marzo en ventana de 4 años (vía continua / Almeyda et al.)
+  const inicio48 = addDaysIso(params.fechaCorte, -(365 * 4) + 1) || params.fechaCorte
+  const tardiosMarzo = iniciosTardiosMarzo(periodosNorm, inicio48, params.fechaCorte, contOpts)
+  const cont48 = continuidadPorDias(periodosNorm, inicio48, params.fechaCorte, contOpts)
+
+  // Horas: sumar actos contrata/extensión vigentes; reemplazo aparte; sin tope 44
   const vigente = horasVigentesEnCorte(
     periodosNorm,
     params.fechaCorte,
-    (cal) => ['contrata', 'reemplazo', 'extension', 'otro'].includes(cal),
-    { topeHoras: 44 }
+    (cal) => ['contrata', 'extension', 'otro'].includes(cal),
+    { topeHoras: null }
+  )
+  const vigenteReemplazo = horasVigentesEnCorte(
+    periodosNorm,
+    params.fechaCorte,
+    (cal) => cal === 'reemplazo',
+    { topeHoras: null }
   )
 
   const esDirectivo = esDirectivoCargo(data.cargo, params.cargosDirectivos)
@@ -141,11 +157,16 @@ function evaluar21803(data, modo = 'transitorio', fechaCorte, opts = {}) {
     return cal === 'contrata' || cal === 'reemplazo' || cal === 'extension' || cal === 'otro'
   })
 
-  const antigüedadOk =
-    met.mesesContinuosMax >= params.mesesContinuosMin ||
-    met.mesesTotalesVentana >= params.mesesDiscontinuosMin
+  const viaContinua = met.mesesContinuosMax >= params.mesesContinuosMin
+  const viaDiscontinua = met.mesesTotalesVentana >= params.mesesDiscontinuosMin
+  const antigüedadOk = viaContinua || viaDiscontinua
 
-  const continuidadOk = cont24.ok
+  // Continuidad: últimos 24 meses día a día + sin inicios tardíos de marzo en 48m.
+  // Si vía continua, también exigir cadena día a día de 48 meses.
+  const continuidadOk =
+    cont24.ok &&
+    tardiosMarzo.length === 0 &&
+    (!viaContinua || cont48.ok)
   const horasOk = (vigente.horas || 0) >= params.horasMinimas
   const directivoOk = params.excluirDirectivos ? !esDirectivo : true
   const concursoOk = !params.exigeConcurso
@@ -154,11 +175,14 @@ function evaluar21803(data, modo = 'transitorio', fechaCorte, opts = {}) {
   const fechaVigMarzo =
     parseIso(data.fechaVerificacionVigencia) ||
     parseIso(opts.fechaVerificacionVigencia) ||
+    parseIso(params.modos?.transitorio?.fechaVerificacionVigencia) ||
     (params.modo === 'transitorio' ? primerDiaHabilMarzo(2026) : null)
   let vigenteMarzoOk = true
   let vigenteMarzoDetalle = 'No exigible en este modo'
+  let actosVigenciaMarzo = []
   if (fechaVigMarzo) {
     vigenteMarzoOk = cubreFecha(periodosNorm, fechaVigMarzo, { soloContrata: true })
+    actosVigenciaMarzo = actosQueCubren(periodosNorm, fechaVigMarzo, { soloContrata: true })
     vigenteMarzoDetalle = vigenteMarzoOk
       ? `Contratado al ${fechaVigMarzo}`
       : `Sin contrato a contrata vigente al ${fechaVigMarzo} (1.er día hábil de marzo)`
@@ -170,15 +194,25 @@ function evaluar21803(data, modo = 'transitorio', fechaCorte, opts = {}) {
     req('antiguedad', `Antigüedad ≥ ${params.mesesContinuosMin} meses continuos o ${params.mesesDiscontinuosMin} discontinuos en ${params.ventanaAnios} años`,
       antigüedadOk,
       `Continuos máx: ${met.mesesContinuosMax}; totales ventana: ${met.mesesTotalesVentana}`),
-    req('continuidad_24', 'Contrataciones sucesivas y continuas en los últimos 2 años (día a día)',
-      continuidadOk,
-      continuidadOk
+    req('continuidad_24', 'Contrataciones sucesivas y continuas en los últimos 2 años (día a día; receso solo con art. 41 bis)',
+      cont24.ok,
+      cont24.ok
         ? `Cubre ${inicio24} → ${params.fechaCorte}`
         : (cont24.huecos || []).join('; ') || 'Hay interrupción en los últimos 2 años'),
+    req('inicios_tardios_marzo', 'Sin inicios posteriores al 1.er día hábil de marzo (ventana 48m)',
+      tardiosMarzo.length === 0,
+      tardiosMarzo.length === 0 ? 'Sin inicios tardíos' : tardiosMarzo.join('; ')),
+    req('continuidad_48_si_continua', 'Si vía continua: continuidad día a día en 48 meses',
+      !viaContinua || cont48.ok,
+      !viaContinua
+        ? 'No aplica (vía discontinua)'
+        : cont48.ok
+          ? `Cubre ${inicio48} → ${params.fechaCorte}`
+          : (cont48.huecos || []).join('; ')),
     req('vigente_marzo', `Contrato vigente al primer día hábil de marzo (${fechaVigMarzo || 'n/a'})`,
       vigenteMarzoOk, vigenteMarzoDetalle),
     req('horas', `Horas mínimas (${params.horasMinimas})`, horasOk,
-      `Horas a contrata al corte: ${vigente.horas}`),
+      `Horas a contrata/extensión al corte (suma actos): ${vigente.horas}; reemplazo: ${vigenteReemplazo.horas}`),
     req('directivo', 'No excluido por función directiva', directivoOk,
       esDirectivo ? 'Es directivo (no excluye con params actuales)' : 'No directivo'),
     req('concurso', 'Concurso / proceso transparente', concursoOk,
@@ -194,9 +228,17 @@ function evaluar21803(data, modo = 'transitorio', fechaCorte, opts = {}) {
         ` / racha ${met.mesesContinuosMax} (requiere ${params.mesesContinuosMin})`
     )
   }
-  if (!continuidadOk) {
+  if (!cont24.ok) {
     motivos.push(
       `Sin continuidad día a día en los últimos 2 años: ${(cont24.huecos || []).join('; ')}`
+    )
+  }
+  if (tardiosMarzo.length) {
+    motivos.push(`Inicios tardíos de marzo: ${tardiosMarzo.join('; ')}`)
+  }
+  if (viaContinua && !cont48.ok) {
+    motivos.push(
+      `Vía continua con interrupción día a día en 48 meses: ${(cont48.huecos || []).join('; ')}`
     )
   }
   if (fechaVigMarzo && !vigenteMarzoOk) {
@@ -217,18 +259,14 @@ function evaluar21803(data, modo = 'transitorio', fechaCorte, opts = {}) {
     (params.excluirDirectivos && esDirectivo) ||
     !concursoOk
 
+  // Con decreto/periodos: se resuelve CUMPLE o NO CUMPLE.
+  // REVISAR solo cuando no hay ni decreto ni liquidación (rama sinAntecedentes).
   if (fallaDura) {
     estado = 'NO CUMPLE'
-  } else if (decretosSinLiq) {
-    estado = 'REVISAR'
-    motivos.unshift(
-      hayLiq
-        ? 'Hay meses con decreto/contrato sin liquidación de respaldo'
-        : 'Sin liquidaciones cargadas para contrastar meses servidos'
-    )
   }
 
   const motivosUniq = [...new Set(motivos)]
+  const actosDetalle = (vigente.actos || []).map((a) => a.etiqueta || `${a.inicio} ${a.horas}h`).join(' | ')
 
   return {
     ley: '21803',
@@ -243,17 +281,26 @@ function evaluar21803(data, modo = 'transitorio', fechaCorte, opts = {}) {
     metricas: {
       mesesContinuosMax: met.mesesContinuosMax,
       mesesTotalesVentana: met.mesesTotalesVentana,
-      cubreUltimos24Meses: continuidadOk,
+      cubreUltimos24Meses: cont24.ok,
       continuidad24_inicio: cont24.inicioCadena,
       continuidad24_huecos: cont24.huecos || [],
+      continuidad48_ok: !viaContinua || cont48.ok,
+      continuidad48_huecos: cont48.huecos || [],
+      iniciosTardiosMarzo: tardiosMarzo,
       horasVigentesCorte: vigente.horas,
+      horasReemplazoCorte: vigenteReemplazo.horas,
       actosHorasCorte: vigente.actos || [],
+      actosReemplazoCorte: vigenteReemplazo.actos || [],
+      actosDetalle,
       establecimientos: vigente.establecimientos,
       vigenteAl: fechaVigMarzo,
       vigenteMarzoOk: fechaVigMarzo ? vigenteMarzoOk : null,
+      actosVigenciaMarzo,
+      puentes41Bis: cont24.puentes41Bis || [],
     },
     esDirectivo,
     horas: vigente.horas,
+    horasReemplazo: vigenteReemplazo.horas,
     establecimiento: vigente.establecimientos.join(' / ') || data.establecimiento || null,
     timeline: met.timeline,
     params,

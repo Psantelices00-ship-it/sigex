@@ -6,7 +6,13 @@
 const { describe, it } = require('node:test')
 const assert = require('node:assert/strict')
 const { evaluar21803, evaluar21176 } = require('./evaluar')
-const { ymKey, shiftYm, primerDiaHabilMarzo, horasVigentesEnCorte } = require('./timeline')
+const {
+  ymKey,
+  shiftYm,
+  primerDiaHabilMarzo,
+  horasVigentesEnCorte,
+  cumpleReceso41Bis,
+} = require('./timeline')
 
 function rangoLiq(desdeYm, hastaYm) {
   const out = []
@@ -23,19 +29,45 @@ describe('helpers CGR', () => {
     assert.equal(primerDiaHabilMarzo(2026), '2026-03-02')
   })
 
-  it('horas al corte no suman designaciones solapadas', () => {
+  it('horas al corte suman actos distintos y no duplican el mismo', () => {
     const r = horasVigentesEnCorte(
       [
-        { inicio: '2021-04-01', termino: '2026-02-28', calidad: 'CONTRATA', horas: 3 },
-        { inicio: '2024-03-01', termino: '2026-02-28', calidad: 'CONTRATA', horas: 3 },
-        { inicio: '2025-03-01', termino: '2026-02-28', calidad: 'CONTRATA', horas: 3 },
-        { inicio: '2021-04-01', termino: '2025-12-31', calidad: 'CONTRATA', horas: 14 },
+        { inicio: '2024-03-01', termino: '2026-02-28', calidad: 'CONTRATA', horas: 20, establecimiento: 'F-509', n_decreto: '100' },
+        { inicio: '2024-03-01', termino: '2026-02-28', calidad: 'CONTRATA', horas: 20, establecimiento: 'F-509', n_decreto: '100' }, // dup
+        { inicio: '2025-03-01', termino: '2026-02-28', calidad: 'CONTRATA', horas: 24, establecimiento: 'F-487', n_decreto: '200' },
+        { inicio: '2025-03-01', termino: '2026-02-28', calidad: 'REEMPLAZANTE DOC.', horas: 10, establecimiento: 'F-509', n_decreto: '300' },
       ],
       '2025-07-31',
-      (cal) => cal === 'contrata' || cal === 'otro'
+      (cal) => ['contrata', 'extension', 'otro', 'reemplazo'].includes(cal),
+      { topeHoras: null }
     )
-    // Acto más reciente vigente al corte: 2025-03-01 → 3h (no 3+3+3+14)
-    assert.equal(r.horas, 3)
+    assert.equal(r.horas, 44) // 20+24; reemplazo aparte
+    assert.equal(r.horasReemplazo, 10)
+    assert.equal(r.actos.length, 2)
+  })
+
+  it('sin tope: suma > 44 queda visible', () => {
+    const r = horasVigentesEnCorte(
+      [
+        { inicio: '2024-03-01', termino: '2026-02-28', calidad: 'CONTRATA', horas: 30, establecimiento: 'A', n_decreto: '1' },
+        { inicio: '2024-03-01', termino: '2026-02-28', calidad: 'CONTRATA', horas: 30, establecimiento: 'B', n_decreto: '2' },
+      ],
+      '2025-07-31',
+      (cal) => cal === 'contrata',
+      { topeHoras: null }
+    )
+    assert.equal(r.horas, 60)
+  })
+
+  it('receso 41 bis exige vigente 1-dic y >6 meses', () => {
+    const ok = [
+      { inicio: '2023-03-01', termino: '2023-12-31', calidad: 'CONTRATA', horas: 30 },
+    ]
+    assert.equal(cumpleReceso41Bis(ok, 2024, '2024-03-01'), true)
+    const corto = [
+      { inicio: '2023-10-01', termino: '2023-12-31', calidad: 'CONTRATA', horas: 30 },
+    ]
+    assert.equal(cumpleReceso41Bis(corto, 2024, '2024-03-01'), false)
   })
 })
 
@@ -100,7 +132,7 @@ describe('Ley 21.803 transitorio', () => {
     assert.ok(r.motivos.some((m) => /mes/i.test(m)))
   })
 
-  it('recontratación cada marzo (día 1) con receso ene-feb → continuidad no se rompe', () => {
+  it('recontratación cada marzo (día 1) con receso ene-feb → continuidad no se rompe (41 bis)', () => {
     const periodos = []
     for (let y = 2021; y <= 2025; y++) {
       periodos.push({
@@ -124,6 +156,21 @@ describe('Ley 21.803 transitorio', () => {
     const r = evaluar21803(data, 'transitorio', '2025-07-31')
     assert.equal(r.metricas.cubreUltimos24Meses, true)
     assert.notEqual(r.estado, 'NO CUMPLE')
+  })
+
+  it('receso sin 6 meses de servicio → NO CUMPLE', () => {
+    const data = {
+      periodos: [
+        { inicio: '2023-10-01', termino: '2023-12-31', calidad: 'CONTRATA', horas: 30 },
+        { inicio: '2024-03-01', termino: '2025-02-28', calidad: 'CONTRATA', horas: 30 },
+        { inicio: '2025-03-01', termino: '2026-12-31', calidad: 'CONTRATA', horas: 30 },
+      ],
+      liquidacionesYm: rangoLiq('2023-10', '2026-03'),
+      cargo: 'DOCENTE',
+    }
+    const r = evaluar21803(data, 'transitorio', '2025-07-31')
+    assert.equal(r.metricas.cubreUltimos24Meses, false)
+    assert.equal(r.estado, 'NO CUMPLE')
   })
 
   it('contrato 2024 desde el 5 de marzo → NO CUMPLE (CGR / OF196034)', () => {
@@ -164,7 +211,6 @@ describe('Ley 21.803 transitorio', () => {
   })
 
   it('recontratación 2025 desde el 10 de marzo → NO CUMPLE (Amigo / hábil=03)', () => {
-    // 01-03-2025 = sábado → 1.er hábil = 03-03-2025; inicio 10-03 rompe
     const data = {
       nombre: 'Amigo tipo',
       periodos: [
@@ -183,21 +229,39 @@ describe('Ley 21.803 transitorio', () => {
     assert.equal(r.metricas.cubreUltimos24Meses, false)
   })
 
-  it('horas al corte = decreto vigente (no suma solapes)', () => {
+  it('inicio 03-03-2023 (hábil era 01) en vía continua → NO CUMPLE', () => {
+    const data = {
+      nombre: 'Almeyda tipo',
+      periodos: [
+        { inicio: '2021-03-01', termino: '2022-12-31', calidad: 'CONTRATA', horas: 44 },
+        { inicio: '2023-03-03', termino: '2026-02-28', calidad: 'CONTRATA', horas: 44 },
+        { inicio: '2026-03-02', termino: '2027-02-28', calidad: 'CONTRATA', horas: 44 },
+      ],
+      liquidacionesYm: rangoLiq('2021-03', '2026-03'),
+      cargo: 'DOCENTE',
+    }
+    const r = evaluar21803(data, 'transitorio', '2025-07-31')
+    assert.equal(r.estado, 'NO CUMPLE')
+    assert.ok(
+      r.motivos.some((m) => /continuidad|Hueco|48|Inicio de cadena/i.test(m))
+    )
+  })
+
+  it('horas al corte = suma de actos concurrentes (distintos establecimientos)', () => {
     const data = {
       periodos: [
-        { inicio: '2021-04-01', termino: '2026-02-28', calidad: 'CONTRATA', horas: 3 },
-        { inicio: '2023-03-01', termino: '2026-02-28', calidad: 'CONTRATA', horas: 3 },
-        { inicio: '2025-03-01', termino: '2026-12-31', calidad: 'CONTRATA', horas: 3 },
+        { inicio: '2021-04-01', termino: '2026-02-28', calidad: 'CONTRATA', horas: 20, establecimiento: 'F-509', n_decreto: '10' },
+        { inicio: '2023-03-01', termino: '2026-02-28', calidad: 'CONTRATA', horas: 24, establecimiento: 'F-487', n_decreto: '20' },
       ],
       liquidacionesYm: rangoLiq('2021-04', '2026-03'),
       cargo: 'DOCENTE',
     }
     const r = evaluar21803(data, 'transitorio', '2025-07-31')
-    assert.equal(r.horas, 3)
+    assert.equal(r.horas, 44)
+    assert.ok(String(r.metricas.actosDetalle || '').includes('20'))
   })
 
-  it('sin antecedentes SIGEX → REVISAR (no NO CUMPLE)', () => {
+  it('sin antecedentes → REVISAR (no NO CUMPLE)', () => {
     const r = evaluar21803(
       { nombre: 'Sin ficha', rut: '1-9', periodos: [], liquidacionesYm: [], sinAntecedentesSigex: true },
       'transitorio',
@@ -205,6 +269,25 @@ describe('Ley 21.803 transitorio', () => {
     )
     assert.equal(r.estado, 'REVISAR')
     assert.ok(r.motivos.some((m) => /Sin antecedentes/i.test(m)))
+  })
+
+  it('periodos externos sin ficha SIGEX se evalúan (Almonacid: inicio marzo tardío → NO CUMPLE)', () => {
+    const r = evaluar21803(
+      {
+        nombre: 'Almonacid',
+        rut: '1-9',
+        sinAntecedentesSigex: true,
+        periodos: [
+          { inicio: '2024-04-01', termino: '2026-02-28', calidad: 'CONTRATA', horas: 30 },
+          { inicio: '2026-03-09', termino: '2026-03-24', calidad: 'REEMPLAZANTE DOC.', horas: 29 },
+        ],
+        liquidacionesYm: [],
+      },
+      'transitorio',
+      '2025-07-31'
+    )
+    assert.equal(r.estado, 'NO CUMPLE')
+    assert.equal(r.metricas.vigenteMarzoOk, false)
   })
 
   it('sin contrato al 02-03-2026 → NO CUMPLE', () => {
@@ -218,6 +301,19 @@ describe('Ley 21.803 transitorio', () => {
     const r = evaluar21803(data, 'transitorio', '2025-07-31')
     assert.equal(r.estado, 'NO CUMPLE')
     assert.ok(r.motivos.some((m) => /2026-03-02|marzo/i.test(m)))
+  })
+
+  it('contrato que empieza 12-03-2026 no marca vigente al 02-03-2026', () => {
+    const data = {
+      periodos: [
+        { inicio: '2021-08-01', termino: '2025-12-30', calidad: 'CONTRATA', horas: 32 },
+        { inicio: '2026-03-12', termino: '2027-02-28', calidad: 'CONTRATA', horas: 26 },
+      ],
+      liquidacionesYm: rangoLiq('2021-08', '2025-12'),
+      cargo: 'DOCENTE',
+    }
+    const r = evaluar21803(data, 'transitorio', '2025-07-31')
+    assert.equal(r.metricas.vigenteMarzoOk, false)
   })
 
   it('directivo a contrata que cumple plazos → CUMPLE con esDirectivo', () => {
@@ -237,6 +333,24 @@ describe('Ley 21.803 transitorio', () => {
     const r = evaluar21803(data, 'transitorio', '2025-07-31')
     assert.equal(r.estado, 'CUMPLE')
     assert.equal(r.esDirectivo, true)
+  })
+
+  it('decreto sin liquidación en algunos meses → CUMPLE o NO CUMPLE (no REVISAR)', () => {
+    const data = {
+      periodos: [
+        {
+          inicio: '2021-08-01',
+          termino: '2026-12-31',
+          calidad: 'CONTRATA',
+          horas: 30,
+        },
+      ],
+      liquidacionesYm: rangoLiq('2021-08', '2023-12'),
+      cargo: 'DOCENTE',
+    }
+    const r = evaluar21803(data, 'transitorio', '2025-07-31')
+    assert.notEqual(r.estado, 'REVISAR')
+    assert.equal(r.estado, 'CUMPLE')
   })
 })
 
@@ -294,26 +408,6 @@ describe('Ley 21.176', () => {
     const r = evaluar21176(data, 'inciso2', '2025-12-31')
     assert.equal(r.estado, 'NO CUMPLE')
     assert.ok(r.motivos.some((m) => /30|titulares/i.test(m)))
-  })
-})
-
-describe('Inconsistencias', () => {
-  it('decreto sin liquidaciones en algunos meses → REVISAR', () => {
-    const data = {
-      periodos: [
-        {
-          inicio: '2021-08-01',
-          termino: '2026-12-31',
-          calidad: 'CONTRATA',
-          horas: 30,
-        },
-      ],
-      liquidacionesYm: rangoLiq('2021-08', '2023-12'),
-      cargo: 'DOCENTE',
-    }
-    const r = evaluar21803(data, 'transitorio', '2025-07-31')
-    assert.equal(r.estado, 'REVISAR')
-    assert.ok(r.motivos.some((m) => /liquidaci[oó]n/i.test(m)))
   })
 })
 

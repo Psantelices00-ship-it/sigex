@@ -41,6 +41,8 @@ function periodoDesdeExtraccion(doc, ficha) {
     mismoSostenedor: true,
     fuente: doc.tipo_documental || 'decreto',
     doc_id: doc.id,
+    n_decreto: x.n_decreto != null && x.n_decreto !== '' ? String(x.n_decreto) : null,
+    fecha_decreto: x.fecha_decreto || null,
   }
 }
 
